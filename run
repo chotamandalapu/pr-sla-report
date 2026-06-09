@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Convenience launcher — one command to generate the monthly report.
+# Auto-creates the venv on first run, then drops you into the interactive prompts.
+set -e
+
+cd "$(dirname "$0")"
+
+if [ ! -d ".venv" ]; then
+    echo "→ First run: creating Python virtual environment..."
+    python3 -m venv .venv
+    .venv/bin/pip install --quiet --upgrade pip
+fi
+
+# Install / refresh deps quietly (no-op if already current).
+.venv/bin/pip install --quiet -r requirements.txt
+
+exec .venv/bin/python src/run_interactive.py "$@"

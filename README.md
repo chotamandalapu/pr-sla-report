@@ -10,10 +10,11 @@ One slide per repo. Layout mirrors the `Template` sheet in your Excel config (te
 
 - [What it does](#what-it-does)
 - [Features](#features)
+- [Interactive mode (one command — `./run`)](#interactive-mode-one-command---run)
 - [Output columns — full specification](#output-columns--full-specification)
 - [Prerequisites — software](#prerequisites--software)
 - [First-time setup on any machine](#first-time-setup-on-any-machine)
-- [Configuring repos + team (`team-config.xlsx`)](#configuring-repos--team-team-configxlsx)
+- [Configuring repos + team (`Monthly Report Data.xlsx`)](#configuring-repos--team-monthly-report-dataxlsx)
 - [Personal Access Token (PAT) — required scopes](#personal-access-token-pat--required-scopes)
 - [Running the script locally](#running-the-script-locally)
 - [Sorting options](#sorting-options)
@@ -62,6 +63,46 @@ You run it once a month (or let GitHub Actions run it automatically on the 1st).
 
 ---
 
+## Interactive mode (one command — `./run`)
+
+For day-to-day use, you don't need to remember any flags. Just run:
+
+```bash
+./run
+```
+
+(or `.venv/bin/python src/run_interactive.py` if you prefer)
+
+It walks you through **6 steps** (1 prerequisite check + 5 prompts):
+
+| # | Prompt | What it does |
+|---|---|---|
+| 0 | **Prerequisites** | Detects your Python version and whether `git` is on PATH. Shows install commands for macOS / Linux / Windows. Asks `y/n` to continue. Refuses to continue if Python is older than 3.10 unless you override. |
+| 1 | **Confirm repos** | Displays every repo URL from the `Repos` sheet and asks `y/n`. If `n`, exits so you can fix the Excel file. |
+| 2 | **Confirm team** | Displays every team member (Name + V-id) from the `Team` sheet and asks `y/n`. Same exit behavior if `n`. |
+| 3 | **PAT** | Shows step-by-step instructions for creating the PAT with the correct scopes, then prompts for the token **with input hidden** (like `sudo`). If `ADO_PAT` is already set in the environment, offers to reuse it. The PAT is held in memory only — never written to disk. |
+| 4 | **Year/Month** | Format `YYYY/MM` (e.g. `2026/05`). Accepts `2026-05`, `05/2026`, etc. Press Enter to accept the default (previous calendar month). Future months are rejected. |
+| 5 | **Sort?** | `y/n`. If `y`, choose key (1=approved, 2=dev-complete, 3=days, 4=author) and ascending/descending. |
+
+Then it runs, prints a per-repo extraction summary (PR counts), and ends with:
+
+```
+══════════════════════════════════════════════════════════════════════
+✓ Report generated
+══════════════════════════════════════════════════════════════════════
+  SUCCESS
+  File:  /Users/<you>/Personal/pr-sla-report/output/PR_SLA_2026-05.pptx
+  Size:  31.2 KB
+  Slides: 2  (one per repo)
+
+  Open with:
+    open '/Users/<you>/Personal/pr-sla-report/output/PR_SLA_2026-05.pptx'
+```
+
+Ctrl-C at any prompt cancels cleanly.
+
+---
+
 ## Output columns — full specification
 
 | # | Column header (in PPT) | Source | Format | Hyperlink? |
@@ -99,32 +140,36 @@ That's it — every other dependency is pulled from `requirements.txt` into an i
 git clone <your-fork-url> ~/Personal/pr-sla-report
 cd ~/Personal/pr-sla-report
 
-# 2. Create an isolated Python environment
+# 2. (macOS/Linux) Make the launcher executable
+chmod +x ./run
+
+# 3. Run it — it auto-creates the venv and installs deps on first run
+./run
+```
+
+That's it. You'll be walked through step 0 (prerequisite check) + 5 prompts
+(repos / team / PAT / month / sort) and the resulting `.pptx` will be saved to
+`output/`.
+
+### Manual / advanced setup
+
+If you'd rather use the lower-level CLI (e.g. for cron, CI, or non-interactive
+runs) see [Running the script locally](#running-the-script-locally).
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate          # macOS/Linux
 # .venv\Scripts\activate           # Windows PowerShell
-
-# 3. Install dependencies (~30 MB)
 pip install -r requirements.txt
-
-# 4. Set your ADO PAT (see next section for how to create one)
 export ADO_PAT="<paste-your-token>"
-# Persist it: append `export ADO_PAT=...` to ~/.zshrc or ~/.bashrc
-
-# 5. Run a test for last month
-python src/generate_report.py
-
-# 6. Open the result
-open output/PR_SLA_*.pptx          # macOS
-# start output\PR_SLA_*.pptx       # Windows
-# xdg-open output/PR_SLA_*.pptx    # Linux
+python src/generate_report.py      # non-interactive, previous month
 ```
 
 ---
 
-## Configuring repos + team (`team-config.xlsx`)
+## Configuring repos + team (`Monthly Report Data.xlsx`)
 
-Open [config/team-config.xlsx](config/team-config.xlsx) — it has **three sheets**:
+Open [Monthly Report Data.xlsx](Monthly%20Report%20Data.xlsx) at the repo root — it has **three sheets**:
 
 ### Sheet 1: `Repos`
 
@@ -338,13 +383,14 @@ pr-sla-report/
 ├── .github/
 │   └── workflows/
 │       └── monthly-report.yml      # cron + manual dispatch
-├── config/
-│   └── team-config.xlsx            # repos + team + template (the only file you edit)
 ├── output/                         # generated .pptx files (gitignored)
 ├── src/
-│   └── generate_report.py          # the whole script
+│   ├── generate_report.py          # core extraction + PPT build (also a CLI)
+│   └── run_interactive.py          # interactive 5-prompt wrapper
+├── run                             # convenience launcher (auto-creates venv)
 ├── .gitignore
 ├── CONTEXT.md                      # design notes for AI agents working on this repo
+├── Monthly Report Data.xlsx        # repos + team + template (the only file you edit)
 ├── README.md                       # this file
 └── requirements.txt                # Python deps
 ```
@@ -379,7 +425,7 @@ git pull
 ## FAQ
 
 **Q: Can I add more repos?**
-Add a row in `Repos` sheet of `team-config.xlsx`. Push the change to GitHub — the workflow picks it up next run.
+Add a row in `Repos` sheet of `Monthly Report Data.xlsx`. Push the change to GitHub — the workflow picks it up next run.
 
 **Q: Can I add more team members?**
 Add a row in `Team` sheet with their full name and UPN.

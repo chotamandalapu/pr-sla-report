@@ -2,10 +2,10 @@
 """
 PR SLA Monthly Report Generator
 --------------------------------
-Reads team + repo config from config/team-config.xlsx, queries Azure DevOps
-for completed PRs per team member in the configured window (default: previous
-calendar month), and emits a PowerPoint deck mirroring the layout in the
-Template sheet (one slide per repo).
+Reads team + repo config from `Monthly Report Data.xlsx` (at the repo root),
+queries Azure DevOps for completed PRs per team member in the configured window
+(default: previous calendar month), and emits a PowerPoint deck mirroring the
+layout in the Template sheet (one slide per repo).
 
 Usage:
     python src/generate_report.py                # previous calendar month
@@ -47,7 +47,7 @@ from pptx.util import Emu, Inches, Pt
 # Paths + logging
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG_XLSX = ROOT / "config" / "team-config.xlsx"
+CONFIG_XLSX = ROOT / "Monthly Report Data.xlsx"
 OUTPUT_DIR = ROOT / "output"
 
 logging.basicConfig(

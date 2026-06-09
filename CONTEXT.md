@@ -9,34 +9,45 @@
 
 A small Python CLI that pulls completed pull-request data from Azure DevOps and emits a PowerPoint deck that matches a pre-existing manual monthly report format. It is run **once a month** (by GitHub Actions cron or by the user manually). It has **no UI**, **no web server**, **no database** — just `Excel config` → `ADO REST API` → `.pptx`.
 
-The single source of truth for repos + team membership is [`config/team-config.xlsx`](config/team-config.xlsx). The script is intentionally driven by that file, not by env vars or CLI flags, because the end user maintains it in Excel as they always have.
+The single source of truth for repos + team membership is [`Monthly Report Data.xlsx`](Monthly%20Report%20Data.xlsx) at the repo root. The script is intentionally driven by that file, not by env vars or CLI flags, because the end user maintains it in Excel as they always have.
 
 ---
 
 ## 2. Architecture (1-page)
 
 ```
-team-config.xlsx               (user-editable; 3 sheets: Repos, Team, Template)
+Monthly Report Data.xlsx           (user-editable; 3 sheets: Repos, Team, Template)
        │
        ▼
-generate_report.py
-  ├── load_config()                 → [RepoRef], [(name, upn)]
-  ├── time-window resolution        → previous month / --month / --from --to
-  ├── AdoClient
-  │     ├── resolve_user_id(upn)    → ADO identity GUID (cached per org)
-  │     ├── completed_prs_for_user  → paginated GET pullrequests?status=completed&creatorId=
-  │     ├── pr_last_commit_date     → GET pullrequests/{id}/commits  → max(committer.date)
-  │     ├── pr_last_approval_date   → GET pullrequests/{id}/threads  → latest VoteUpdate with vote≥5
-  │     └── pr_work_item_ids        → GET pullrequests/{id}/workitems
-  ├── extract_rows()                → dict[RepoRef, list[PrRow]]
-  ├── _sort_key()                   → respects --sort-by + --desc
-  └── build_deck()                  → python-pptx, one slide per repo
-                                       │
-                                       ▼
-                          output/PR_SLA_<YYYY-MM>.pptx
+ run_interactive.py  ←── the front door for humans
+   ├── 5 prompts (repos confirm / team confirm / PAT / month / sort)
+   ├── PAT collected via getpass (hidden input, never written to disk)
+   └── calls into
+         generate_report.py        ←── also a standalone CLI for cron/CI
+           ├── load_config()                 → [RepoRef], [(name, upn)]
+           ├── time-window resolution        → previous month / --month / --from --to
+           ├── AdoClient
+           │     ├── resolve_user_id(upn)    → ADO identity GUID (cached per org)
+           │     ├── completed_prs_for_user  → paginated GET pullrequests?status=completed&creatorId=
+           │     ├── pr_last_commit_date     → GET pullrequests/{id}/commits  → max(committer.date)
+           │     ├── pr_last_approval_date   → GET pullrequests/{id}/threads  → latest VoteUpdate with vote≥5
+           │     └── pr_work_item_ids        → GET pullrequests/{id}/workitems
+           ├── extract_rows()                → dict[RepoRef, list[PrRow]]
+           ├── _sort_key()                   → respects --sort-by + --desc
+           └── build_deck()                  → python-pptx, one slide per repo
+                                                  │
+                                                  ▼
+                                     output/PR_SLA_<YYYY-MM>.pptx
 ```
 
-Everything lives in one Python file ([src/generate_report.py](src/generate_report.py)) deliberately — the project is small enough that splitting it into modules costs more than it saves.
+There are two entry points:
+
+* **`run_interactive.py`** (front door for humans, called by `./run`) — 5 prompts,
+  ANSI-styled output, hidden PAT input. Imports from `generate_report` and never
+  duplicates business logic.
+* **`generate_report.py`** (also a CLI: `python src/generate_report.py --month
+  2026-05 --sort-by approved`) — used by GitHub Actions cron because non-
+  interactive runs can't stop for prompts.
 
 ---
 
@@ -210,11 +221,11 @@ Add a step to [.github/workflows/monthly-report.yml](.github/workflows/monthly-r
 
 ### Add a new repo
 
-Just edit `config/team-config.xlsx` → `Repos` sheet. No code change.
+Just edit `Monthly Report Data.xlsx` → `Repos` sheet. No code change.
 
 ### Add a new team member
 
-Edit `config/team-config.xlsx` → `Team` sheet. The script resolves their UPN to an identity GUID on next run.
+Edit `Monthly Report Data.xlsx` → `Team` sheet. The script resolves their UPN to an identity GUID on next run.
 
 ---
 
@@ -222,10 +233,12 @@ Edit `config/team-config.xlsx` → `Team` sheet. The script resolves their UPN t
 
 | File | Owner | Purpose |
 |---|---|---|
-| `src/generate_report.py` | Everything: config load, ADO client, extraction, PPT build, CLI | The whole script |
-| `config/team-config.xlsx` | User | Repos + Team + Template reference |
+| `src/generate_report.py` | Everything: config load, ADO client, extraction, PPT build, CLI | Core engine + non-interactive CLI |
+| `src/run_interactive.py` | UX | 5-prompt interactive wrapper. Imports from `generate_report`. PAT via getpass. Never writes the PAT to disk. |
+| `run` | UX | Bash launcher: auto-creates `.venv`, installs `requirements.txt`, execs the interactive runner. |
+| `Monthly Report Data.xlsx` | User | Repos + Team + Template reference |
 | `requirements.txt` | Dev deps | `openpyxl`, `python-pptx`, `requests`, `numpy` — pinned to major versions, not exact |
-| `.github/workflows/monthly-report.yml` | CI | Monthly cron + manual dispatch + artifact upload |
+| `.github/workflows/monthly-report.yml` | CI | Monthly cron + manual dispatch + artifact upload (uses generate_report.py CLI directly, NOT the interactive runner) |
 | `output/` | Generated | All `.pptx` files; gitignored |
 | `.venv/` | Local | Python venv; gitignored |
 | `README.md` | User-facing | Setup, usage, features, troubleshooting |
@@ -268,7 +281,7 @@ If you change the PPT building code (`build_deck` / `render_slide`), you should 
 - In GitHub Actions, `ADO_PAT` is set from a repo secret. The workflow file references `${{ secrets.ADO_PAT }}` only — GitHub masks the value in logs.
 - The `.gitignore` excludes `.env`. If you ever add a `.env` for local dev, do **not** commit it.
 - All ADO calls are read-only. The PAT scopes (`Code:Read`, `Work Items:Read`, `Identity:Read`) cannot mutate ADO state even if compromised.
-- `team-config.xlsx` is committed because UPNs are not sensitive. If your team list ever becomes sensitive, move it to a private location or to GitHub Actions secrets.
+- `Monthly Report Data.xlsx` is committed because UPNs are not sensitive. If your team list ever becomes sensitive, move it to a private location or to GitHub Actions secrets.
 
 ---
 
