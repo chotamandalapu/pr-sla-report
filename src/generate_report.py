@@ -94,10 +94,15 @@ class PrRow:
     pr_title: str
     author_name: str
     author_upn: str
-    last_commit_date: dt.date
-    completed_date: dt.date
+    # "Dev Complete / PR Submitted Date" = last commit pushed to the PR branch.
+    dev_complete_date: dt.date
+    # "Approved Date" = timestamp of the LAST approval vote on the PR
+    # (vote == 10 or vote == 5).  Falls back to PR.closedDate if no vote found.
+    approved_date: dt.date
+    # Business days between dev_complete_date and approved_date (inclusive of end).
     business_days: int
     work_item_ids: list[int]
+    closed_date: dt.date  # kept for filtering / audit
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +325,56 @@ class AdoClient:
                 continue
         return sorted(ids)
 
+    def pr_last_approval_date(
+        self, repo: RepoRef, pr_id: int
+    ) -> dt.date | None:
+        """Latest timestamp at which a reviewer voted Approved (10) or
+        Approved-with-suggestions (5) on the PR.
+
+        ADO records each vote change as a *system* thread whose
+        `properties.CodeReviewThreadType` == 'VoteUpdate' and whose
+        `properties.CodeReviewVoteResult` is the vote value as a string.
+        The first comment in that thread is the system message; its
+        `publishedDate` is the moment the vote happened.
+        """
+        url = (
+            f"{repo.api_base}/git/repositories/{quote(repo.repo)}"
+            f"/pullRequests/{pr_id}/threads"
+        )
+        try:
+            data = self._get(url, params={"api-version": "7.1"})
+        except requests.HTTPError as e:
+            log.warning("threads fetch failed for PR %d: %s", pr_id, e)
+            return None
+
+        latest: dt.datetime | None = None
+        for thread in data.get("value", []):
+            props = thread.get("properties") or {}
+            tt = (props.get("CodeReviewThreadType") or {}).get("$value")
+            if tt != "VoteUpdate":
+                continue
+            vote_raw = (props.get("CodeReviewVoteResult") or {}).get("$value")
+            try:
+                vote = int(vote_raw) if vote_raw is not None else 0
+            except (TypeError, ValueError):
+                vote = 0
+            # 10 = Approved, 5 = Approved with suggestions.
+            # Negative or 0 votes (Reset, Waiting, Rejected) are skipped.
+            if vote < 5:
+                continue
+            comments = thread.get("comments") or []
+            ts_str = None
+            for c in comments:
+                ts_str = c.get("publishedDate") or ts_str
+            if not ts_str:
+                ts_str = thread.get("publishedDate") or thread.get("lastUpdatedDate")
+            if not ts_str:
+                continue
+            ts = _parse_iso(ts_str)
+            if latest is None or ts > latest:
+                latest = ts
+        return latest.date() if latest else None
+
 
 def _parse_iso(s: str) -> dt.datetime:
     # ADO returns "2026-04-30T18:23:11.0123456Z" — handle the trailing Z.
@@ -364,6 +419,13 @@ def extract_rows(
                 pr_id = pr["pullRequestId"]
                 closed = _parse_iso(pr["closedDate"]).date()
                 last_commit = client.pr_last_commit_date(repo, pr_id) or closed
+                last_approval = client.pr_last_approval_date(repo, pr_id)
+                if last_approval is None:
+                    log.info(
+                        "  PR %d: no approval vote found, falling back to closedDate %s",
+                        pr_id, closed,
+                    )
+                    last_approval = closed
                 wi_ids = client.pr_work_item_ids(repo, pr_id)
                 out[repo].append(
                     PrRow(
@@ -372,10 +434,13 @@ def extract_rows(
                         pr_title=pr.get("title", ""),
                         author_name=name,
                         author_upn=upn,
-                        last_commit_date=last_commit,
-                        completed_date=closed,
-                        business_days=business_days_between(last_commit, closed),
+                        dev_complete_date=last_commit,
+                        approved_date=last_approval,
+                        business_days=business_days_between(
+                            last_commit, last_approval
+                        ),
                         work_item_ids=wi_ids,
+                        closed_date=closed,
                     )
                 )
     return out
@@ -509,13 +574,13 @@ def render_slide(prs: Presentation, repo: RepoRef, rows: list[PrRow], month_labe
         pr_url = f"{row.repo.web_pr_base}/{row.pr_id}"
         _set_cell_text(tbl.cell(ri, 1), pr_url, font_size=8, hyperlink=pr_url)
 
-        # Dev Complete (= last commit date) and Approved (= completed)
+        # Dev Complete (= last commit date) and Approved (= last approval vote)
         _set_cell_text(
-            tbl.cell(ri, 2), row.last_commit_date.strftime("%m/%d/%Y"),
+            tbl.cell(ri, 2), row.dev_complete_date.strftime("%m/%d/%Y"),
             font_size=9,
         )
         _set_cell_text(
-            tbl.cell(ri, 3), row.completed_date.strftime("%m/%d/%Y"),
+            tbl.cell(ri, 3), row.approved_date.strftime("%m/%d/%Y"),
             font_size=9,
         )
         _set_cell_text(
@@ -528,10 +593,26 @@ def render_slide(prs: Presentation, repo: RepoRef, rows: list[PrRow], month_labe
         tbl.rows[ri].height = row_height
 
 
+SORT_CHOICES = ("dev-complete", "approved", "days", "author")
+
+
+def _sort_key(row: PrRow, by: str):
+    if by == "dev-complete":
+        return (row.dev_complete_date, row.approved_date, row.pr_id)
+    if by == "approved":
+        return (row.approved_date, row.dev_complete_date, row.pr_id)
+    if by == "days":
+        return (row.business_days, row.approved_date, row.pr_id)
+    # author
+    return (row.author_name.lower(), row.dev_complete_date, row.pr_id)
+
+
 def build_deck(
     data: dict[RepoRef, list[PrRow]],
     month_label: str,
     out_path: Path,
+    sort_by: str = "approved",
+    sort_desc: bool = False,
 ):
     prs = Presentation()
     # 16:9 widescreen, 13.33 x 7.5 in
@@ -539,8 +620,7 @@ def build_deck(
     prs.slide_height = Inches(7.5)
 
     for repo, rows in data.items():
-        # Sort rows by author then PR id
-        rows.sort(key=lambda r: (r.author_name.lower(), r.pr_id))
+        rows.sort(key=lambda r: _sort_key(r, sort_by), reverse=sort_desc)
         render_slide(prs, repo, rows, month_label)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +642,23 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Output .pptx path (default: output/PR_SLA_<MONTH>.pptx).",
+    )
+    ap.add_argument(
+        "--sort-by",
+        choices=SORT_CHOICES,
+        default="approved",
+        help=(
+            "How to sort rows within each repo slide. "
+            "'dev-complete' = by last commit date; "
+            "'approved' = by last approval date (default); "
+            "'days' = by business days to process; "
+            "'author' = alphabetical by name."
+        ),
+    )
+    ap.add_argument(
+        "--desc",
+        action="store_true",
+        help="Sort descending (default: ascending).",
     )
     args = ap.parse_args(argv)
 
@@ -593,7 +690,13 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Total PRs across all repos: %d", total)
 
     out_path = args.output or (OUTPUT_DIR / f"PR_SLA_{slug}.pptx")
-    build_deck(data, month_label, out_path)
+    build_deck(
+        data,
+        month_label,
+        out_path,
+        sort_by=args.sort_by,
+        sort_desc=args.desc,
+    )
     return 0
 
 
