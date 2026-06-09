@@ -1,14 +1,22 @@
 # PR SLA Monthly Report
 
+**Version: 1.3.1** — local-only, no SaaS, no cloud account required (beyond your existing Microsoft corp account).
+
 Auto-generate a PowerPoint deck listing every team member's **completed pull requests** across multiple Azure DevOps repos for a chosen month, with computed SLA metrics (last commit date, last approval date, business days between them) and hyperlinks to every PR and linked work item.
 
-One slide per repo. Layout mirrors the `Template` sheet in your Excel config (teal → blue gradient header, 6 columns).
+**Two slides per repo:**
+1. `<repo> | PR SLA (Month)` — PRs merged to `main`
+2. `<repo> | Feature Merge PRs (Month)` — everything else (feature/release branches)
+
+Layout mirrors the `Template` sheet in your Excel config (teal → blue gradient header, 6 columns).
 
 ---
 
 ## Table of Contents
 
 - [What it does](#what-it-does)
+- [Quick Start — Step-by-Step Walkthrough](#quick-start--step-by-step-walkthrough)
+- [Architecture & Flow](#architecture--flow)
 - [Features](#features)
 - [Interactive mode (one command — `./run`)](#interactive-mode-one-command---run)
 - [Output columns — full specification](#output-columns--full-specification)
@@ -16,6 +24,7 @@ One slide per repo. Layout mirrors the `Template` sheet in your Excel config (te
 - [First-time setup on any machine](#first-time-setup-on-any-machine)
 - [Configuring repos + team (`Monthly Report Data.xlsx`)](#configuring-repos--team-monthly-report-dataxlsx)
 - [Personal Access Token (PAT) — required scopes](#personal-access-token-pat--required-scopes)
+- [Authentication](#authentication)
 - [Running the script locally](#running-the-script-locally)
 - [Sorting options](#sorting-options)
 - [Automating with GitHub Actions (recommended)](#automating-with-github-actions-recommended)
@@ -39,10 +48,365 @@ For every such PR it pulls:
 1. The **last commit** that landed on the PR branch → "Dev Complete / PR Submitted Date".
 2. The timestamp of the **last reviewer-approval vote** on the PR → "Approved Date".
 3. The IDs of every **linked work item** (ADO tasks/bugs/user stories).
+4. The target branch (used to split slides into main-merge vs feature-merge).
 
-Then it computes **business days** between `Dev Complete` and `Approved` (weekends excluded; same-day = `0`), assembles one slide per repo with a hyperlinked table, and writes a `.pptx`.
+Then it computes **business days** between `Dev Complete` and `Approved` (weekends excluded; same-day = `0`), assembles two slides per repo with a hyperlinked table, and writes a `.pptx`.
 
 You run it once a month (or let GitHub Actions run it automatically on the 1st).
+
+---
+
+## Quick Start — Step-by-Step Walkthrough
+
+**Follow these in order.** Steps marked **A. / B. / C.** are one-time setup; steps marked **1. / 2. / 3. …** are what you do each month.
+
+### A. Install prerequisites
+
+| Tool | Why | Install on macOS | Install on Linux | Install on Windows |
+|---|---|---|---|---|
+| **Python 3.10+** | Runs the script | `brew install python@3.12` | `sudo apt install python3.12 python3.12-venv` | [python.org installer](https://www.python.org/downloads/) — check "Add to PATH" |
+| **Git** | Clone the repo | `brew install git` | `sudo apt install git` | [git-scm.com](https://git-scm.com/) |
+| **Azure CLI** *(recommended — skip PAT)* | Sign in via browser, no token in dotfiles | `brew install azure-cli` | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash` | [docs.microsoft.com](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) |
+
+> If you skip Azure CLI you'll have to create a Personal Access Token (PAT) every 90 days. See [Authentication](#authentication) for details.
+
+### B. Get the project and bootstrap
+
+```bash
+# Clone (replace URL with wherever you keep it)
+git clone <repo-url> ~/Personal/pr-sla-report
+cd ~/Personal/pr-sla-report
+
+# Make the launcher executable
+chmod +x ./run
+```
+
+That's it. The launcher will auto-create a Python `.venv` and install all dependencies the first time you run it. No `pip install` to remember.
+
+### C. Sign in to Azure (one-time, lasts until your refresh token expires)
+
+```bash
+az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47
+```
+
+A browser tab opens for Microsoft sign-in + MFA. After you sign in, your terminal will show a list of Azure subscriptions and ask you to pick a default. **Just press Enter** — the script doesn't use Azure subscriptions, only ADO.
+
+> 🚫 **If you can't or don't want to use Azure CLI**, create a PAT instead: see [Personal Access Token](#personal-access-token-pat--required-scopes), then `export ADO_PAT="<your-token>"` before running.
+
+### D. Edit `Monthly Report Data.xlsx` once
+
+Open it (it's at the repo root). Three sheets:
+
+| Sheet | What to do |
+|---|---|
+| **Repos** | List every ADO repo URL you want covered, one per row. |
+| **Team** | List every team member as `Name, V-id@microsoft.com` (one per row). Only PRs *created by* these people get included. |
+| **Template** | Reference only — shows the slide layout. Don't edit. |
+
+Save and close.
+
+---
+
+### 1. Run the tool
+
+```bash
+cd ~/Personal/pr-sla-report
+./run
+```
+
+The launcher will install deps on first run (~30 seconds), then drop you into 6 numbered prompts. Here's exactly what each one looks like and what to pick:
+
+#### Step 0/6 — Prerequisites check
+
+```
+[0/6] Mandatory prerequisites
+─────────────────────────────────────────────────────────────────────────
+  Required on this machine:
+    • Python 3.10+  (detected: 3.12.x)  ✓
+    • Git           (detected: git version 2.x.x) ✓
+
+  Confirm both Python and Git are installed and you want to continue? [Y/n]:
+```
+
+→ Press **Enter** (= Yes). If something's red, install the missing tool from the **A. Install prerequisites** table above.
+
+#### Step 1/6 — Confirm Repos sheet
+
+```
+[1/6] Confirm the Repos sheet
+─────────────────────────────────────────────────────────────────────────
+  Configured in Monthly Report Data.xlsx → sheet Repos:
+    1. https://dev.azure.com/MicrosoftIT/OneITVSO/_git/ConsumerStore-WebComponents
+    2. https://microsoftit.visualstudio.com/OneITVSO/_git/CE-SITES-aemfnd-MT-AEM
+
+  Are these the correct repos? [Y/n]:
+```
+
+→ Press **Enter** to accept. If wrong, type **`n`**, fix the xlsx, re-run.
+
+#### Step 2/6 — Confirm Team sheet
+
+```
+[2/6] Confirm the Team sheet
+─────────────────────────────────────────────────────────────────────────
+  Configured in Monthly Report Data.xlsx → sheet Team:
+    Name                          V-id (UPN)
+    Akshay Lagad                  v-aklagad@microsoft.com
+    Avinash MANDALAPU             v-avinashman@microsoft.com
+    ...
+
+  Are all N team members correct and up to date? [Y/n]:
+```
+
+→ Press **Enter**. Same exit-and-fix flow if anything is missing.
+
+#### Step 3/6 — Azure DevOps credentials
+
+If `az login` succeeded (step C), you'll see:
+
+```
+[3/6] Azure DevOps credentials
+─────────────────────────────────────────────────────────────────────────
+  Trying Azure CLI for a bearer token...
+  ✓ Got a bearer token from `az` (2636 chars).
+  No PAT needed. This token is valid for ~1–12 hours.
+  Use this token? [Y/n]:
+```
+
+→ Press **Enter** to use the `az` token. Done.
+
+If you didn't `az login`, it falls back to asking for a PAT (input hidden, like `sudo` — the script never writes it to disk).
+
+#### Step 4/6 — Reporting period
+
+```
+[4/6] Reporting period
+─────────────────────────────────────────────────────────────────────────
+  Format: YYYY/MM  (e.g. 2026/05 for May 2026)
+  Press Enter to accept default (2026/05 = last month).
+
+  Year/Month to report on [2026/05]:
+```
+
+→ Press **Enter** for last month, or type `YYYY/MM` (also accepts `2026-05`, `05/2026`).
+
+Future months are rejected.
+
+#### Step 5/6 — Sorting
+
+```
+[5/6] Sort the results?
+─────────────────────────────────────────────────────────────────────────
+  Should the final results be sorted? [Y/n]:
+```
+
+→ Press **Enter** (default: sort by Approved Date, ascending).
+
+If you say `y` and continue, you'll be asked to pick a key:
+
+```
+  Choose a sort key:
+    1) approved      — by Approved Date (default)
+    2) dev-complete  — by Dev Complete / PR Submitted Date
+    3) days          — by Days To Process (slowest = useful with desc)
+    4) author        — alphabetical by team member name
+
+  Pick 1-4 [1]:
+```
+
+| Pick | When to use |
+|---|---|
+| **1 (approved)** *default* | Standard monthly report — chronological by when each PR got approved. |
+| **2 (dev-complete)** | When you care about commit-throughput order rather than approval order. |
+| **3 (days)** | Highlights bottlenecks. Combine with the descending option below to see slowest PRs first. |
+| **4 (author)** | Groups PRs by person — useful for individual contributor reviews. |
+
+```
+  Sort descending? (No = ascending) [y/N]:
+```
+
+→ Press **Enter** for ascending. Type **`y`** if you picked `days` and want slowest first.
+
+#### Generation phase (no input — runs automatically)
+
+You'll see something like:
+
+```
+══════════════════════════════════════════════════════════════════════
+Generating report
+══════════════════════════════════════════════════════════════════════
+  01:52:34 INFO Window: 2026-05-01 → 2026-05-31 (May 2026)
+  01:52:34 INFO Reporting timezone: America/Los_Angeles
+  01:52:55 INFO == Repo: ConsumerStore-WebComponents (MicrosoftIT) ==
+  01:52:58 INFO   Akshay Lagad (v-aklagad@microsoft.com): 4 PR(s)
+  01:53:01 INFO   Avinash MANDALAPU (v-avinashman@microsoft.com): 8 PR(s)
+  ...
+  ─────────────────────────────────────────────────────────────────────
+  Extraction summary
+    ● ConsumerStore-WebComponents              14 PR(s)
+    ● CE-SITES-aemfnd-MT-AEM                   14 PR(s)
+  Total: 28 PR(s)
+  01:53:08 INFO Slides built: 22 main-merge PR(s), 6 feature-merge PR(s)
+  01:53:08 INFO Wrote output/PR_SLA_2026-05.pptx
+```
+
+#### Done
+
+```
+══════════════════════════════════════════════════════════════════════
+✓ Report generated
+══════════════════════════════════════════════════════════════════════
+  SUCCESS
+  File:  /Users/<you>/Personal/pr-sla-report/output/PR_SLA_2026-05.pptx
+  Size:  32.0 KB
+  Slides: 4  (2 per repo)
+
+  Open with:
+    open '/Users/<you>/Personal/pr-sla-report/output/PR_SLA_2026-05.pptx'
+```
+
+Copy-paste the `open` line into the terminal to launch the deck in PowerPoint/Keynote.
+
+---
+
+## Architecture & Flow
+
+### High-level component diagram
+
+```mermaid
+flowchart LR
+    User([👤 You])
+    Excel[("Monthly Report Data.xlsx<br/>• Repos sheet<br/>• Team sheet")]
+    Run["<b>./run</b><br/>bash launcher"]
+    Interactive["src/run_interactive.py<br/>(6 steps)"]
+    Core["src/generate_report.py<br/>(extraction + PPT)"]
+    Auth{{"Auth resolver<br/>(ADO_PAT or az login)"}}
+    ADO[("Azure DevOps REST API<br/>dev.azure.com")]
+    PPT[/"PR_SLA_YYYY-MM.pptx<br/>2 slides per repo"/]
+
+    User -->|edits monthly| Excel
+    User -->|runs| Run
+    Run --> Interactive
+    Interactive -->|loads| Excel
+    Interactive --> Core
+    Core --> Auth
+    Auth -->|Authorization header| ADO
+    ADO -->|JSON| Core
+    Core -->|writes| PPT
+    PPT --> User
+
+    style User fill:#FFD43B,stroke:#222,color:#222
+    style Excel fill:#1F6FEB,stroke:#fff,color:#fff
+    style ADO fill:#0078D4,stroke:#fff,color:#fff
+    style PPT fill:#D04A02,stroke:#fff,color:#fff
+    style Auth fill:#8B5CF6,stroke:#fff,color:#fff
+```
+
+### Auth resolution waterfall
+
+Each run picks one of two auth modes in this priority order:
+
+```mermaid
+flowchart TD
+    Start([Run starts])
+    Q1{ADO_PAT env var set?}
+    Q2{az CLI installed AND logged in?}
+    UsePAT[/"Mode: PAT<br/>Authorization: Basic base64(:PAT)"/]
+    UseBearer[/"Mode: Bearer<br/>Authorization: Bearer &lt;az token&gt;"/]
+    Fail[/"❌ Error<br/>'No ADO credential available'<br/>Set ADO_PAT or run az login"/]
+
+    Start --> Q1
+    Q1 -->|yes| UsePAT
+    Q1 -->|no| Q2
+    Q2 -->|yes| UseBearer
+    Q2 -->|no| Fail
+
+    style UsePAT fill:#F9A825,stroke:#222,color:#222
+    style UseBearer fill:#2E7D32,stroke:#fff,color:#fff
+    style Fail fill:#C62828,stroke:#fff,color:#fff
+```
+
+> **Recommendation:** use `az login`. PAT mode is kept for GitHub Actions (CI can't sign in interactively).
+
+### End-to-end sequence (what happens when you press Enter on Step 4)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as You
+    participant R as run_interactive.py
+    participant G as generate_report.py
+    participant Az as az CLI
+    participant A as Azure DevOps API
+    participant P as python-pptx
+    participant F as Filesystem
+
+    U->>R: ./run
+    R->>R: Step 0 — verify Python + Git
+    R->>R: Step 1 — confirm Repos sheet
+    R->>R: Step 2 — confirm Team sheet
+    R->>Az: get-access-token (Step 3)
+    Az-->>R: bearer token
+    R->>R: Step 4 — parse year/month
+    R->>R: Step 5 — sort key
+    R->>G: extract_rows(client, repos, team, since, until)
+
+    loop For each repo
+        loop For each team member
+            G->>A: GET pullrequests?status=completed&creatorId=…
+            A-->>G: list of completed PRs
+            loop For each PR
+                G->>A: GET pullRequests/{id}/commits
+                G->>A: GET pullRequests/{id}/threads
+                G->>A: GET pullRequests/{id}/workitems
+                A-->>G: commit list / thread list / WI ids
+                G->>G: compute Dev Complete / Approved (in PT)
+                G->>G: compute business days
+            end
+        end
+    end
+
+    G->>G: split rows: is_to_main vs feature
+    G->>P: build 2 slides per repo
+    P->>F: write PR_SLA_YYYY-MM.pptx
+    G-->>R: total PR count
+    R-->>U: success banner + file path
+```
+
+### What each value in the deck comes from
+
+```mermaid
+flowchart LR
+    subgraph "ADO REST response"
+        PR[("PR object<br/>creator, closedDate,<br/>targetRefName")]
+        Commits[("Commits[]<br/>committer.date")]
+        Threads[("Threads[]<br/>VoteUpdate w/ vote≥5")]
+        WIs[("WorkItems[]<br/>ids")]
+    end
+
+    subgraph "Computed for the row"
+        Author[Author Name]
+        DevC[Dev Complete /<br/>PR Submitted Date]
+        Approved[Approved Date]
+        Days[Days To Process]
+        Tags[ADO Link cell]
+        Slide{is_to_main?}
+    end
+
+    PR -->|createdBy.displayName| Author
+    Commits -->|max committer.date → PT date| DevC
+    Threads -->|latest vote≥5 → PT date| Approved
+    PR -. fallback if no vote .-> Approved
+    DevC -- numpy.busday_count --> Days
+    Approved -- numpy.busday_count --> Days
+    WIs -->|space-joined IDs + WI links| Tags
+    PR -->|targetRefName == refs/heads/main| Slide
+    Slide -->|true| Slide1[/"Slide 1<br/>'PR SLA'"/]
+    Slide -->|false| Slide2[/"Slide 2<br/>'Feature Merge PRs'"/]
+
+    style Slide1 fill:#2E7D32,stroke:#fff,color:#fff
+    style Slide2 fill:#8E24AA,stroke:#fff,color:#fff
+```
 
 ---
 
