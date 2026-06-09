@@ -63,8 +63,11 @@ One row of the output table. Fields:
 - `approved_date`      — date of last reviewer **approval** vote (vote ≥ 5), NOT the PR `closedDate`.
 - `business_days`      — `numpy.busday_count(dev_complete_date, approved_date)`.
 - `closed_date`        — kept for fallback + audit only; never displayed if `approved_date` was resolvable.
+- `target_branch`      — bare branch name from `pr["targetRefName"]` with the `refs/heads/` prefix stripped. Used by `build_deck()` to split rows into the **main-merge** slide vs the **Feature Merge PRs** slide. `is_to_main` property is `target_branch == "main"`.
 
 **Why three dates instead of two?** The user originally conflated "completed" with "approved". A PR can be approved on day X but only auto-completed days later (e.g. policy waiting for build). The SLA the team is measured against is **approval turnaround**, so `approved_date` is the metric.
+
+**Why split by target branch?** A team's "real" PR throughput is measured by what landed on `main`. Work in flight on feature branches counts differently for SLA purposes (it's intermediate work, often reviewed by a smaller subset). The two-slide split keeps both visible without mixing them in a single average.
 
 ---
 

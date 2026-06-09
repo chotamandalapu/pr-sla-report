@@ -134,6 +134,14 @@ class PrRow:
     business_days: int
     work_item_ids: list[int]
     closed_date: dt.date  # kept for filtering / audit
+    # Bare branch name (e.g. "main", "feature/foo") taken from the PR's
+    # `targetRefName` (`refs/heads/<name>` is stripped). Drives the
+    # main-vs-feature slide split. Empty string for unknown.
+    target_branch: str = ""
+
+    @property
+    def is_to_main(self) -> bool:
+        return self.target_branch == "main"
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +466,8 @@ def extract_rows(
                     )
                     last_approval = closed
                 wi_ids = client.pr_work_item_ids(repo, pr_id)
+                target_ref = pr.get("targetRefName", "") or ""
+                target_branch = target_ref.removeprefix("refs/heads/")
                 out[repo].append(
                     PrRow(
                         repo=repo,
@@ -472,6 +482,7 @@ def extract_rows(
                         ),
                         work_item_ids=wi_ids,
                         closed_date=closed,
+                        target_branch=target_branch,
                     )
                 )
     return out
@@ -550,8 +561,14 @@ def _build_ado_links_cell(cell, ids: list[int], repo: RepoRef):
         run.hyperlink.address = f"{repo.web_workitem_base}/{wi_id}"
 
 
-def render_slide(prs: Presentation, repo: RepoRef, rows: list[PrRow], month_label: str):
-    """One slide per repo, table layout matching the screenshot."""
+def render_slide(prs: Presentation, repo: RepoRef, rows: list[PrRow],
+                 month_label: str, title_suffix: str = "PR SLA"):
+    """Render a single slide for a (repo, row-set) pair.
+
+    `title_suffix` is rendered between the repo name and the month, e.g.
+    "PR SLA" \u2192  "RepoName | PR SLA (May 2026)"
+    "Feature Merge PRs" \u2192 "RepoName | Feature Merge PRs (May 2026)"
+    """
     blank_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(blank_layout)
 
@@ -559,7 +576,7 @@ def render_slide(prs: Presentation, repo: RepoRef, rows: list[PrRow], month_labe
     tb = slide.shapes.add_textbox(Inches(0.4), Inches(0.25), Inches(12.5), Inches(0.6))
     p = tb.text_frame.paragraphs[0]
     run = p.add_run()
-    run.text = f"{repo.short_name} | PR SLA ({month_label})"
+    run.text = f"{repo.short_name} | {title_suffix} ({month_label})"
     run.font.size = Pt(26)
     run.font.bold = True
     run.font.color.rgb = TITLE_RED
@@ -650,10 +667,27 @@ def build_deck(
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
+    # For each repo we render TWO slides:
+    #   1. "<repo> | PR SLA (Month)"            \u2014 PRs merged to main only
+    #   2. "<repo> | Feature Merge PRs (Month)" \u2014 PRs merged to any other branch
+    # The second slide is rendered even if empty so the deck has a consistent
+    # slide order for each repo.
+    main_count = 0
+    feat_count = 0
     for repo, rows in data.items():
         rows.sort(key=lambda r: _sort_key(r, sort_by), reverse=sort_desc)
-        render_slide(prs, repo, rows, month_label)
+        main_rows    = [r for r in rows if r.is_to_main]
+        feature_rows = [r for r in rows if not r.is_to_main]
+        main_count += len(main_rows)
+        feat_count += len(feature_rows)
+        render_slide(prs, repo, main_rows, month_label, title_suffix="PR SLA")
+        render_slide(prs, repo, feature_rows, month_label,
+                     title_suffix="Feature Merge PRs")
 
+    log.info(
+        "Slides built: %d main-merge PR(s), %d feature-merge PR(s)",
+        main_count, feat_count,
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(out_path)
     log.info("Wrote %s", out_path)

@@ -107,6 +107,12 @@ Ctrl-C at any prompt cancels cleanly.
 
 > **Date conversion:** ADO returns all timestamps in UTC. The dates shown in the deck are converted to **Pacific Time (`America/Los_Angeles`)** before being truncated to a day. Override with `--tz <IANA name>` (e.g. `--tz Asia/Kolkata`).
 
+> **Slide layout (v1.2.0+):** For each repo the deck contains **two slides**:
+> 1. **`<repo> | PR SLA (Month)`** — PRs whose target branch is `main`.
+> 2. **`<repo> | Feature Merge PRs (Month)`** — every other completed PR (feature branches, release branches, etc.).
+>
+> Both slides use the same 6-column table. The feature-merge slide is rendered even when empty so the deck always has the same slide count.
+
 | # | Column header (in PPT) | Source | Format | Hyperlink? |
 |---|---|---|---|---|
 | 1 | **ADO Link** | All work-item IDs linked to the PR via the ADO `pullRequests/{id}/workitems` endpoint. | Space-separated list of numeric IDs (e.g. `15717821  15732018  15706485`). | ✅ Each ID links to `https://dev.azure.com/<org>/<project>/_workitems/edit/<id>`. |
