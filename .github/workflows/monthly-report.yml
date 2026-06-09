@@ -1,0 +1,46 @@
+name: Monthly PR SLA Report
+
+on:
+  schedule:
+    # 1st of every month at 02:00 UTC → 1st 7am IST / 1st 7pm PT prev-day
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Override month (YYYY-MM). Leave blank for previous calendar month."
+        required: false
+        default: ""
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Generate report
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          if [ -n "${{ github.event.inputs.month }}" ]; then
+            python src/generate_report.py --month "${{ github.event.inputs.month }}"
+          else
+            python src/generate_report.py
+          fi
+
+      - name: Upload deck as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-sla-report
+          path: output/*.pptx
+          if-no-files-found: error
+          retention-days: 90
