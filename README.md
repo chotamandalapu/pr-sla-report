@@ -1,6 +1,6 @@
 # PR SLA Monthly Report
 
-**Version: 1.3.1** — local-only, no SaaS, no cloud account required (beyond your existing Microsoft corp account).
+**Version: 1.4.0** — local-only, no SaaS, no cloud account required (beyond your existing Microsoft corp account).
 
 Auto-generate a PowerPoint deck listing every team member's **completed pull requests** across multiple Azure DevOps repos for a chosen month, with computed SLA metrics (last commit date, last approval date, business days between them) and hyperlinks to every PR and linked work item.
 
@@ -775,13 +775,15 @@ We filter to threads with vote `≥ 5`, take the latest `comments[].publishedDat
 ### Days To Process
 
 ```python
-numpy.busday_count(dev_complete_date, approved_date)
+numpy.busday_count(dev_complete_date, approved_date, holidays=MS_HOLIDAYS)
 ```
 
-- Weekends are excluded.
+- **Weekends are always excluded.**
+- **Microsoft-observed holidays are excluded by default (v1.4.0+)**: the script fetches your company's official holiday list from `holidays.microsoft.com` (HR API: `hrdp-api.microsoft.com`) using your `az` bearer token, caches it under `~/.cache/pr-sla-report/holidays-YYYY.json`, and excludes those dates too. For 2026 (US, company code 1010) this is **10 days**: New Year's Day, MLK Day, Presidents Day, Memorial Day, Independence Day (Jul 3 observed), Labor Day, Thanksgiving, Day After Thanksgiving, Christmas Eve, Christmas Day.
 - Same-day = `0`.
 - Approved before Dev Complete (rare; can happen if someone approved, then more commits came in but no re-approval) → clamped to `0`.
-- **US public holidays are NOT excluded.** To exclude them, edit `business_days_between` in [src/generate_report.py](src/generate_report.py) to pass a `holidays=[...]` argument to `numpy.busday_count`.
+- To disable holiday exclusion entirely, pass `--holidays off`.
+- If `az` isn't available (e.g. running in CI with `ADO_PAT` only) the holiday fetch is silently skipped and the report falls back to weekends-only.
 
 ---
 

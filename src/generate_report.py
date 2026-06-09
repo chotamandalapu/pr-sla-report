@@ -25,6 +25,7 @@ import argparse
 import base64
 import calendar
 import datetime as dt
+import json
 import logging
 import os
 import re
@@ -504,10 +505,150 @@ def _parse_iso(s: str) -> dt.datetime:
 # ---------------------------------------------------------------------------
 # Business-day math
 # ---------------------------------------------------------------------------
+
+# Internal corp HR API for the Microsoft holiday calendar. Discovered by
+# reverse-engineering the SPA at https://holidays.microsoft.com/ — the API is
+# private but accessible to any Microsoft employee or vendor with a bearer
+# token from `az` for this resource ID.
+MS_HOLIDAY_API_RESOURCE = "7a13909b-cd2a-4ed1-86f9-490db032e0cd"
+MS_HOLIDAY_API_URL_TPL = (
+    "https://hrdp-api.microsoft.com/holidays"
+    "/api/v1/GlobalCountryHolidays/{upn}/getByUpn/includedomaindata"
+)
+
+# Cache fetched lists per year so we don't hit the API on every run.
+_HOLIDAY_CACHE_DIR = Path.home() / ".cache" / "pr-sla-report"
+
+# Set by --holidays / `set_holiday_dates()`. None = don't exclude any holidays.
+_holiday_dates: list[dt.date] | None = None
+
+
+def set_holiday_dates(dates: list[dt.date] | None) -> None:
+    global _holiday_dates
+    _holiday_dates = dates
+
+
+def fetch_microsoft_holidays(year: int) -> list[dt.date]:
+    """Return all Microsoft-observed public holidays for the user's company
+    code for the given year.
+
+    Uses an `az` bearer token (your existing login). Caches the response per
+    year in `~/.cache/pr-sla-report/holidays-YYYY.json` so subsequent runs
+    don't refetch.
+
+    Returns an empty list (and logs a warning) on any failure — never raises,
+    so a network blip can't break the whole report.
+    """
+    # Cache hit?
+    _HOLIDAY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = _HOLIDAY_CACHE_DIR / f"holidays-{year}.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            return [dt.date.fromisoformat(s) for s in data["dates"]]
+        except Exception:
+            pass  # fall through and refetch
+
+    token = _try_az_token_for_resource(MS_HOLIDAY_API_RESOURCE)
+    if not token:
+        log.warning(
+            "Could not get bearer token for HR holidays API; "
+            "report will treat holidays as working days. (Run `az login` to fix.)"
+        )
+        return []
+
+    # Resolve the user's own UPN to call /{upn}/getByUpn.
+    import subprocess as _sp
+    try:
+        upn_res = _sp.run(
+            ["az", "account", "show", "--query", "user.name", "-o", "tsv"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        upn = upn_res.stdout.strip() if upn_res.returncode == 0 else ""
+    except Exception:
+        upn = ""
+    if not upn:
+        log.warning("Could not resolve user UPN via `az`; skipping holiday fetch.")
+        return []
+
+    url = MS_HOLIDAY_API_URL_TPL.format(upn=quote(upn))
+    try:
+        r = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        log.warning("Holiday API call failed: %s", e)
+        return []
+    if r.status_code != 200:
+        log.warning("Holiday API HTTP %s — skipping holidays.", r.status_code)
+        return []
+
+    try:
+        payload = r.json()
+        holidays_raw = payload.get("Holidays", [])
+    except (ValueError, KeyError) as e:
+        log.warning("Holiday API parse failed: %s", e)
+        return []
+
+    dates: list[dt.date] = []
+    target_prefix = f"{year}-"
+    for h in holidays_raw:
+        start = h.get("PublicHolidayStartDate", "")
+        if not start.startswith(target_prefix):
+            continue
+        try:
+            dates.append(dt.date.fromisoformat(start[:10]))
+        except ValueError:
+            continue
+
+    dates = sorted(set(dates))
+    # Persist cache
+    try:
+        cache_file.write_text(json.dumps({
+            "year": year,
+            "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "dates": [d.isoformat() for d in dates],
+        }, indent=2))
+    except OSError:
+        pass
+    return dates
+
+
+def _try_az_token_for_resource(resource_id: str) -> str | None:
+    """Same shape as _try_az_token() but allows any resource (not just ADO)."""
+    import shutil as _sh
+    import subprocess as _sp
+    if not _sh.which("az"):
+        return None
+    try:
+        r = _sp.run(
+            ["az", "account", "get-access-token", "--resource", resource_id,
+             "--query", "accessToken", "-o", "tsv"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (_sp.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    tok = r.stdout.strip()
+    return tok or None
+
+
 def business_days_between(start: dt.date, end: dt.date) -> int:
-    """Exclusive of `start`, inclusive of `end`. Same-day = 0."""
+    """Exclusive of `start`, inclusive of `end`. Same-day = 0.
+
+    If `set_holiday_dates([…])` has been called, those dates are also
+    excluded (weekends are always excluded).
+    """
     if end < start:
         return 0
+    if _holiday_dates:
+        hols_np = np.array(
+            [d.isoformat() for d in _holiday_dates], dtype="datetime64[D]"
+        )
+        return int(np.busday_count(start, end, holidays=hols_np))
     return int(np.busday_count(start, end))
 
 
@@ -812,6 +953,17 @@ def main(argv: list[str] | None = None) -> int:
             f"{DEFAULT_REPORT_TZ}."
         ),
     )
+    ap.add_argument(
+        "--holidays",
+        default="auto",
+        choices=["auto", "off"],
+        help=(
+            "Holiday handling for 'Days To Process'. "
+            "'auto' (default) fetches Microsoft observed holidays from "
+            "holidays.microsoft.com (via `az`) for every year in the window "
+            "and excludes them. 'off' counts holidays as working days."
+        ),
+    )
     args = ap.parse_args(argv)
 
     try:
@@ -837,6 +989,22 @@ def main(argv: list[str] | None = None) -> int:
         slug = since.strftime("%Y-%m")
 
     log.info("Window: %s → %s (%s)", since, until, month_label)
+
+    # Holiday set up — fetched ONCE before extraction so business-day math
+    # in extract_rows() uses the correct exclusions.
+    if args.holidays == "auto":
+        years = sorted({since.year, until.year})
+        all_hols: list[dt.date] = []
+        for y in years:
+            all_hols.extend(fetch_microsoft_holidays(y))
+        set_holiday_dates(sorted(set(all_hols)))
+        log.info(
+            "Holidays: excluded %d Microsoft-observed day(s) for year(s) %s",
+            len(all_hols), years,
+        )
+    else:
+        set_holiday_dates(None)
+        log.info("Holidays: not excluded (--holidays off)")
 
     repos, team = load_config(CONFIG_XLSX)
     client = build_default_client()

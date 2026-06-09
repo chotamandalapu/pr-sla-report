@@ -191,7 +191,9 @@ If no qualifying thread is found, fall back to `pr.closedDate` and emit an INFO 
 - Friday → Monday → `1`
 - Negative `end < start` → clamped to `0` (returned before calling NumPy)
 
-**Holidays are intentionally NOT included.** The user opted not to track them in v1 to avoid the bikeshed of "whose holiday calendar". Adding them is a one-line change documented in the README FAQ.
+**Microsoft-observed holidays ARE excluded (v1.4.0+).** Fetched from `hrdp-api.microsoft.com` (reverse-engineered from the SPA at holidays.microsoft.com — the same API). Cached per year in `~/.cache/pr-sla-report/holidays-YYYY.json`. Auth via `az account get-access-token --resource 7a13909b-cd2a-4ed1-86f9-490db032e0cd`. Helper: `fetch_microsoft_holidays(year)`. If `az` isn't available (CI) the fetch is silently skipped and weekends-only behavior returns. `--holidays off` forces opt-out.
+
+The user's *own* UPN is queried via `az account show --query user.name -o tsv`; the API returns the holiday list for the company code derived from that UPN (US employees get the US 10-day calendar, India employees get the India calendar, etc.). Vendors/contractors share the holiday list of whatever company code their UPN maps to.
 
 ### 6.1 Timezone conversion (v1.1.0+)
 
