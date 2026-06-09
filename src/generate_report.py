@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import quote, urlparse
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import openpyxl
@@ -42,6 +43,36 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
+
+# ---------------------------------------------------------------------------
+# Reporting timezone
+# ---------------------------------------------------------------------------
+# ADO returns all timestamps in UTC. The dates we DISPLAY in the deck are
+# whatever moment-in-time those UTC instants correspond to in this zone.
+#
+# Default is America/Los_Angeles (PT) — Microsoft HQ time — because most
+# Microsoft-internal reports framing approvals frame them in PT.
+#
+# Override per run with --tz <IANA name>  (e.g. --tz Asia/Kolkata).
+DEFAULT_REPORT_TZ = "America/Los_Angeles"
+_report_tz: ZoneInfo = ZoneInfo(DEFAULT_REPORT_TZ)
+
+
+def set_report_tz(tz_name: str) -> None:
+    global _report_tz
+    _report_tz = ZoneInfo(tz_name)
+
+
+def report_tz_name() -> str:
+    return str(_report_tz)
+
+
+def to_report_date(d: dt.datetime) -> dt.date:
+    """Convert any (tz-aware) datetime to the configured reporting zone, then
+    truncate to a date."""
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone(_report_tz).date()
 
 # ---------------------------------------------------------------------------
 # Paths + logging
@@ -308,7 +339,7 @@ class AdoClient:
         )
         if not ts:
             return None
-        return _parse_iso(ts).date()
+        return to_report_date(_parse_iso(ts))
 
     def pr_work_item_ids(self, repo: RepoRef, pr_id: int) -> list[int]:
         url = f"{repo.api_base}/git/repositories/{quote(repo.repo)}/pullRequests/{pr_id}/workitems"
@@ -373,7 +404,7 @@ class AdoClient:
             ts = _parse_iso(ts_str)
             if latest is None or ts > latest:
                 latest = ts
-        return latest.date() if latest else None
+        return to_report_date(latest) if latest else None
 
 
 def _parse_iso(s: str) -> dt.datetime:
@@ -417,7 +448,7 @@ def extract_rows(
                 log.info("  %s (%s): %d PR(s)", name, upn, len(prs))
             for pr in prs:
                 pr_id = pr["pullRequestId"]
-                closed = _parse_iso(pr["closedDate"]).date()
+                closed = to_report_date(_parse_iso(pr["closedDate"]))
                 last_commit = client.pr_last_commit_date(repo, pr_id) or closed
                 last_approval = client.pr_last_approval_date(repo, pr_id)
                 if last_approval is None:
@@ -660,7 +691,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Sort descending (default: ascending).",
     )
+    ap.add_argument(
+        "--tz",
+        default=DEFAULT_REPORT_TZ,
+        help=(
+            "IANA timezone for date display (e.g. America/Los_Angeles, "
+            "Asia/Kolkata, UTC). Default: "
+            f"{DEFAULT_REPORT_TZ}."
+        ),
+    )
     args = ap.parse_args(argv)
+
+    try:
+        set_report_tz(args.tz)
+    except Exception as e:
+        ap.error(f"Invalid --tz {args.tz!r}: {e}")
+    log.info("Reporting timezone: %s", report_tz_name())
 
     if args.from_date:
         if not args.to_date:

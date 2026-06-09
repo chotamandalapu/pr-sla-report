@@ -105,6 +105,8 @@ Ctrl-C at any prompt cancels cleanly.
 
 ## Output columns — full specification
 
+> **Date conversion:** ADO returns all timestamps in UTC. The dates shown in the deck are converted to **Pacific Time (`America/Los_Angeles`)** before being truncated to a day. Override with `--tz <IANA name>` (e.g. `--tz Asia/Kolkata`).
+
 | # | Column header (in PPT) | Source | Format | Hyperlink? |
 |---|---|---|---|---|
 | 1 | **ADO Link** | All work-item IDs linked to the PR via the ADO `pullRequests/{id}/workitems` endpoint. | Space-separated list of numeric IDs (e.g. `15717821  15732018  15706485`). | ✅ Each ID links to `https://dev.azure.com/<org>/<project>/_workitems/edit/<id>`. |
@@ -236,6 +238,10 @@ python src/generate_report.py --sort-by dev-complete
 python src/generate_report.py --sort-by approved --desc
 python src/generate_report.py --sort-by days
 python src/generate_report.py --sort-by author
+
+# Choose a timezone (default America/Los_Angeles = PT)
+python src/generate_report.py --tz Asia/Kolkata
+python src/generate_report.py --tz UTC
 
 # Custom output path
 python src/generate_report.py --output /tmp/may.pptx

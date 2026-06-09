@@ -142,6 +142,28 @@ If no qualifying thread is found, fall back to `pr.closedDate` and emit an INFO 
 
 **Holidays are intentionally NOT included.** The user opted not to track them in v1 to avoid the bikeshed of "whose holiday calendar". Adding them is a one-line change documented in the README FAQ.
 
+### 6.1 Timezone conversion (v1.1.0+)
+
+ADO returns all timestamps in UTC. Before any timestamp is truncated to a date,
+it's converted to the **reporting timezone** stored in the module-level
+`_report_tz` (set via `set_report_tz(name)` or `--tz`). Default:
+`America/Los_Angeles` (PT — chosen because Microsoft-internal reports usually
+frame events in PT).
+
+**Rule of thumb:** any new code that calls `dt.date()` or `.date()` on a parsed
+ADO timestamp is a bug. Use `to_report_date(parsed_dt)` instead. The three
+existing call sites are:
+- `AdoClient.pr_last_commit_date()` → last commit timestamp
+- `AdoClient.pr_last_approval_date()` → last approval-vote timestamp
+- `extract_rows()` → PR `closedDate`
+
+A history-debugging utility lives at `src/diag_pr.py` — it dumps creator UPN,
+commits, threads, and votes for any given PR ID. Use it when a report row
+looks wrong:
+```
+.venv/bin/python src/diag_pr.py 1934106 1872660
+```
+
 ---
 
 ## 7. PowerPoint generation (`python-pptx`)

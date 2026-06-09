@@ -378,6 +378,17 @@ def prompt_sort() -> tuple[str, bool]:
 def main() -> int:
     banner("PR SLA — Interactive Monthly Report")
 
+    # Timezone notice — printed FIRST so the user always sees it.
+    from generate_report import report_tz_name
+    print()
+    print(f"  {YELLOW}{BOLD}NOTE{RESET}  All dates in the generated report are "
+          f"shown in {BOLD}{report_tz_name()} (PT){RESET}.")
+    print(f"        ADO returns timestamps in UTC; we convert to PT before "
+          f"truncating to a date so values match what")
+    print(f"        Microsoft-internal reports usually use. Override with "
+          f"--tz <IANA name> on the command line.")
+    print()
+
     if not CONFIG_XLSX.exists():
         fail(f"Config file not found: {CONFIG_XLSX}")
         return 1
