@@ -224,20 +224,74 @@ def parse_month(spec: str) -> tuple[dt.date, dt.date]:
 # ---------------------------------------------------------------------------
 # Azure DevOps client
 # ---------------------------------------------------------------------------
-class AdoClient:
-    """Minimal ADO REST client with PAT auth, throttling, and retries."""
+# Azure DevOps's well-known SPN application ID. Used as the `--resource` (a.k.a.
+# scope) when fetching a bearer token via `az account get-access-token`.
+# This GUID is identical across every Azure tenant.
+ADO_RESOURCE_SPN = "499b84ac-1321-427f-aa17-267ca6975798"
 
-    def __init__(self, pat: str):
-        if not pat:
-            raise RuntimeError("ADO_PAT env var is required.")
-        token = base64.b64encode(f":{pat}".encode()).decode()
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Basic {token}",
-                "Accept": "application/json",
-            }
+
+def _try_az_token() -> str | None:
+    """Return a bearer token from the local Azure CLI, or None if unavailable.
+
+    No exceptions escape; failure modes (no `az` installed, not logged in,
+    tenant mismatch, network) all return None so callers can fall back to
+    other auth mechanisms.
+    """
+    import shutil
+    import subprocess
+    import json
+    if not shutil.which("az"):
+        return None
+    try:
+        result = subprocess.run(
+            ["az", "account", "get-access-token", "--resource", ADO_RESOURCE_SPN],
+            capture_output=True, text=True, timeout=15, check=False,
         )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        log.debug("az get-access-token failed: %s", result.stderr.strip()[:200])
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    token = payload.get("accessToken")
+    return token if isinstance(token, str) and token else None
+
+
+class AdoClient:
+    """Minimal ADO REST client. Supports two auth modes:
+       - PAT (Basic <base64(:pat)>) - the historical default
+       - Bearer (Authorization: Bearer <token>) - tokens from az CLI or
+         any other Entra source
+    """
+
+    def __init__(
+        self,
+        pat: str | None = None,
+        *,
+        bearer_token: str | None = None,
+    ):
+        if not pat and not bearer_token:
+            raise RuntimeError(
+                "AdoClient needs either pat= or bearer_token=. "
+                "See resolve_auth() for the auto-resolution policy."
+            )
+        self.session = requests.Session()
+        if bearer_token:
+            self.session.headers.update({
+                "Authorization": f"Bearer {bearer_token}",
+                "Accept": "application/json",
+            })
+            self.auth_mode = "bearer"
+        else:
+            encoded = base64.b64encode(f":{pat}".encode()).decode()
+            self.session.headers.update({
+                "Authorization": f"Basic {encoded}",
+                "Accept": "application/json",
+            })
+            self.auth_mode = "pat"
         # Per-org cache: upn -> ADO identity id (GUID)
         self._user_id_cache: dict[tuple[str, str], str | None] = {}
 
@@ -413,6 +467,30 @@ class AdoClient:
             if latest is None or ts > latest:
                 latest = ts
         return to_report_date(latest) if latest else None
+
+
+def build_default_client() -> "AdoClient":
+    """Auto-resolve auth and return a ready-to-use AdoClient.
+
+    Resolution order:
+      1. `ADO_PAT` env var (legacy default, still works for CI)
+      2. Azure CLI bearer token (`az account get-access-token`)
+      3. Raise — caller is expected to handle and prompt the user.
+
+    The interactive runner has its own resolver that's more conversational;
+    this one is for the bare CLI entry point.
+    """
+    pat = os.environ.get("ADO_PAT", "").strip()
+    if pat:
+        log.info("Auth: using ADO_PAT from environment")
+        return AdoClient(pat=pat)
+    token = _try_az_token()
+    if token:
+        log.info("Auth: using bearer token from `az` CLI")
+        return AdoClient(bearer_token=token)
+    raise RuntimeError(
+        "No ADO credential available. Set ADO_PAT or run `az login`."
+    )
 
 
 def _parse_iso(s: str) -> dt.datetime:
@@ -760,9 +838,8 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("Window: %s → %s (%s)", since, until, month_label)
 
-    pat = os.environ.get("ADO_PAT", "")
     repos, team = load_config(CONFIG_XLSX)
-    client = AdoClient(pat)
+    client = build_default_client()
 
     data = extract_rows(client, repos, team, since, until)
 

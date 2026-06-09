@@ -208,6 +208,8 @@ Reference only — shows the target table shape and screenshot the script reprod
 
 ## Personal Access Token (PAT) — required scopes
 
+> **You can skip the PAT entirely if you use `az login`.** See [Authentication](#authentication) below.
+
 Create at **https://dev.azure.com/MicrosoftIT/_usersSettings/tokens** → **+ New Token**.
 
 | Field | Value |
@@ -224,6 +226,37 @@ Create at **https://dev.azure.com/MicrosoftIT/_usersSettings/tokens** → **+ Ne
 | **Identity** | Read | Resolve each `v-xxx@microsoft.com` UPN to an ADO identity GUID |
 
 Click **Create**. **Copy the token immediately** — ADO never shows it again. If you lose it, regenerate.
+
+---
+
+## Authentication
+
+v1.3.0+ supports two auth modes. The script auto-detects in this order:
+
+| Priority | Mode | When to use | Setup |
+|---|---|---|---|
+| 1 | **`ADO_PAT` env var** | CI / GitHub Actions, or if you already have a PAT in your shell | `export ADO_PAT=...` |
+| 2 | **`az` CLI bearer token** | Local laptop — no secret in dotfiles, browser-based MFA cached for hours | `brew install azure-cli && az login` |
+| 3 | (none → error) | — | — |
+
+### Using `az` (recommended for local runs)
+
+```bash
+brew install azure-cli
+az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47   # MicrosoftIT tenant
+```
+
+That's it. Next `./run` (or `python src/generate_report.py`) will pick up the token automatically. No PAT in `~/.zshrc`, no 90-day rotation.
+
+The cached `az` token is valid for about an hour but is silently refreshed for you up to ~24 hours (longer if your conditional-access policy permits). When it stops refreshing, you'll be prompted to `az login` again.
+
+### Removing your existing PAT
+
+If you switch to `az`, remove the line `export ADO_PAT=...` from `~/.zshrc` and **rotate the token** at https://dev.azure.com/MicrosoftIT/_usersSettings/tokens so the old value can't be reused.
+
+### GitHub Actions still needs a PAT
+
+GitHub Actions runners can't `az login` interactively. The monthly workflow continues to use the `ADO_PAT` repo secret. Local use can be PAT-free; CI cannot.
 
 ---
 

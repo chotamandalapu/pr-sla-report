@@ -254,19 +254,38 @@ def prompt_confirm_team(team) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Prompt 3 — collect PAT
+# Prompt 3 — collect credentials (PAT or Azure CLI bearer token)
 # ---------------------------------------------------------------------------
-def prompt_pat() -> str:
-    step(3, 6, "Azure DevOps Personal Access Token (PAT)")
+def prompt_auth() -> tuple[str, str]:
+    """Returns (kind, value) where kind is 'pat' or 'bearer'."""
+    step(3, 6, "Azure DevOps credentials")
 
-    # If env already provides one, offer to reuse without retyping.
+    # 1. Env var ADO_PAT wins if present.
     existing = os.environ.get("ADO_PAT", "").strip()
     if existing:
         ok(f"Found ADO_PAT in environment ({len(existing)} chars).")
         if ask_yes_no("Use the PAT from your environment?", default=True):
-            return existing
-        warn("Ignoring environment value, prompting for a new PAT.")
+            return ("pat", existing)
+        warn("Ignoring environment value.")
 
+    # 2. Try `az` CLI for a bearer token (no secret in dotfiles).
+    from generate_report import _try_az_token  # local import to avoid cycle
+    import shutil
+    az_present = shutil.which("az") is not None
+    if az_present:
+        print(f"  {DIM}Trying Azure CLI for a bearer token...{RESET}")
+        token = _try_az_token()
+        if token:
+            ok(f"Got a bearer token from `az` ({len(token)} chars).")
+            print(f"  {DIM}No PAT needed. This token is valid for ~1\u201312 hours.{RESET}")
+            if ask_yes_no("Use this token?", default=True):
+                return ("bearer", token)
+        else:
+            warn("`az` CLI is installed but not authenticated, or token fetch failed.")
+            print(f"  {DIM}Try: {BOLD}az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47{RESET}")
+
+    # 3. Fall back to PAT entry.
+    print()
     print(f"  {BOLD}How to create a PAT:{RESET}")
     print(f"    1. Open: {BLUE}https://dev.azure.com/MicrosoftIT/_usersSettings/tokens{RESET}")
     print(f"    2. Click {BOLD}+ New Token{RESET}.")
@@ -279,11 +298,15 @@ def prompt_pat() -> str:
     print(f"         • {GREEN}Identity{RESET}    → {BOLD}Read{RESET}")
     print(f"    7. Click {BOLD}Create{RESET}, then copy the token "
           f"(ADO shows it once).")
+    if not az_present:
+        print()
+        print(f"  {DIM}Tip: install Azure CLI to avoid manual PATs entirely:{RESET}")
+        print(f"  {DIM}    brew install azure-cli && az login{RESET}")
     print()
 
     pat = ask_secret("Paste your PAT here")
     ok(f"PAT received ({len(pat)} chars). It is NOT saved to disk.")
-    return pat
+    return ("pat", pat)
 
 
 # ---------------------------------------------------------------------------
@@ -415,8 +438,8 @@ def main() -> int:
     # 2. Confirm team
     prompt_confirm_team(team)
 
-    # 3. PAT
-    pat = prompt_pat()
+    # 3. Credentials
+    auth_kind, auth_value = prompt_auth()
 
     # 4. Month
     since, until, month_label, slug = prompt_month()
@@ -431,7 +454,10 @@ def main() -> int:
     print()
 
     try:
-        client = AdoClient(pat)
+        if auth_kind == "bearer":
+            client = AdoClient(bearer_token=auth_value)
+        else:
+            client = AdoClient(pat=auth_value)
         data = extract_rows(client, repos, team, since, until)
     except Exception as e:
         print()
