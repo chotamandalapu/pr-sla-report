@@ -19,35 +19,53 @@ The single source of truth for repos + team membership is [`Monthly Report Data.
 Monthly Report Data.xlsx           (user-editable; 3 sheets: Repos, Team, Template)
        │
        ▼
- run_interactive.py  ←── the front door for humans
-   ├── 5 prompts (repos confirm / team confirm / PAT / month / sort)
-   ├── PAT collected via getpass (hidden input, never written to disk)
+ run_interactive.py  ←── the front door for humans (Step 0 + 5 prompts)
+   ├── Step 0: Python + Git prereq check
+   ├── Step 1: confirm Repos sheet (y/n)
+   ├── Step 2: confirm Team sheet (y/n)
+   ├── Step 3: prompt_auth() — waterfall
+   │             ADO_PAT env → az bearer token → manual PAT (getpass)
+   ├── Step 4: month input (YYYY/MM, accepts several formats)
+   ├── Step 5: sort key (approved / dev-complete / days / author) + asc/desc
    └── calls into
          generate_report.py        ←── also a standalone CLI for cron/CI
            ├── load_config()                 → [RepoRef], [(name, upn)]
            ├── time-window resolution        → previous month / --month / --from --to
+           ├── set_report_tz(name)           → default America/Los_Angeles (PT)
+           ├── build_default_client()        → AdoClient with PAT or bearer auth
            ├── AdoClient
+           │     ├── (PAT mode)              → Authorization: Basic base64(":" + pat)
+           │     ├── (bearer mode)           → Authorization: Bearer <az token>
            │     ├── resolve_user_id(upn)    → ADO identity GUID (cached per org)
            │     ├── completed_prs_for_user  → paginated GET pullrequests?status=completed&creatorId=
-           │     ├── pr_last_commit_date     → GET pullrequests/{id}/commits  → max(committer.date)
+           │     ├── pr_last_commit_date     → GET pullrequests/{id}/commits  → max(committer.date) → to_report_date()
            │     ├── pr_last_approval_date   → GET pullrequests/{id}/threads  → latest VoteUpdate with vote≥5
            │     └── pr_work_item_ids        → GET pullrequests/{id}/workitems
            ├── extract_rows()                → dict[RepoRef, list[PrRow]]
+           │                                   (each PrRow carries target_branch)
            ├── _sort_key()                   → respects --sort-by + --desc
-           └── build_deck()                  → python-pptx, one slide per repo
+           └── build_deck()                  → python-pptx,
+                                              TWO slides per repo:
+                                              1. "PR SLA"           = is_to_main
+                                              2. "Feature Merge PRs" = !is_to_main
                                                   │
                                                   ▼
                                      output/PR_SLA_<YYYY-MM>.pptx
+
+ diag_pr.py  ←── per-PR debug tool (creator UPN, commits, votes, parsed dates).
+                 Use when a deck row looks wrong.
 ```
 
-There are two entry points:
+There are three entry points:
 
-* **`run_interactive.py`** (front door for humans, called by `./run`) — 5 prompts,
-  ANSI-styled output, hidden PAT input. Imports from `generate_report` and never
-  duplicates business logic.
+* **`run_interactive.py`** (front door for humans, called by `./run`) — Step 0
+  prereq check + 5 numbered prompts, ANSI-styled output, hidden PAT input.
+  Imports from `generate_report` and never duplicates business logic.
 * **`generate_report.py`** (also a CLI: `python src/generate_report.py --month
-  2026-05 --sort-by approved`) — used by GitHub Actions cron because non-
-  interactive runs can't stop for prompts.
+  2026-05 --sort-by approved --tz Asia/Kolkata`) — used by GitHub Actions cron
+  because non-interactive runs can't stop for prompts.
+* **`diag_pr.py`** — read-only inspection helper. No deck output, just a
+  human-readable dump of how the script interprets a given PR.
 
 ---
 
@@ -81,11 +99,41 @@ One row of the output table. Fields:
 | `GET /git/repositories/{repo}/pullRequests/{id}/threads` | Approval timestamps | See section 5. |
 | `GET /git/repositories/{repo}/pullRequests/{id}/workitems` | Linked work item IDs | Returns just IDs; we don't fetch titles to keep request volume low. |
 
-All endpoints use `api-version=7.1`. Auth is Basic with PAT: `Authorization: Basic base64(":" + PAT)`.
+All endpoints use `api-version=7.1`. **Auth is one of two modes** (auto-resolved — see §4.1):
+
+- **PAT (Basic)**: `Authorization: Basic base64(":" + PAT)`
+- **Bearer**: `Authorization: Bearer <token from az CLI>`
 
 ### Throttling
 
 `AdoClient._get()` retries on `429` and `5xx` with `1s → 2s → 4s → 8s` backoff (max 4 attempts). ADO PR endpoints are rate-limited per org per user. Do NOT remove the retry — large team × large repo × deep history can hit `429` cleanly.
+
+### 4.1 Auth resolution (v1.3.0+)
+
+`AdoClient.__init__(pat=..., bearer_token=...)` accepts either. The helper
+`build_default_client()` picks the right one with this priority:
+
+1. **`ADO_PAT` env var** set → PAT mode. Kept for CI (GitHub Actions can't `az login`).
+2. **`az` CLI installed AND already authenticated** → bearer mode via
+   `az account get-access-token --resource <ADO_RESOURCE_SPN>`.
+3. Neither → `RuntimeError("No ADO credential available...")`.
+
+`ADO_RESOURCE_SPN = "499b84ac-1321-427f-aa17-267ca6975798"` is the well-known
+ADO SPN application ID — identical across every Entra tenant. Do not change.
+
+`_try_az_token()` (also a public helper) is exception-safe: missing `az`, not
+logged in, network failure, tenant mismatch — all return `None` so callers can
+fall through cleanly. Don't add throwing variants.
+
+**Bearer tokens are short-lived (~60–90 min)**, but `az` refreshes silently
+using its cached refresh token (good for hours/days). For a long PR-extract run,
+the same token is reused throughout — we don't refresh mid-run. If a single
+extraction lasts >90 min and the token expires, requests start failing with 401
+and the user is told to re-run after `az login`.
+
+The interactive runner (`run_interactive.py::prompt_auth`) exposes the choice
+to the user with a 3-tier waterfall: existing env-var PAT → `az` token →
+manual PAT entry.
 
 ---
 
@@ -187,6 +235,22 @@ Linear interpolation between `HEADER_LEFT` (teal `#18B2A8`) and `HEADER_RIGHT` (
 ### Why not python-pptx's table style?
 We need per-cell fills and per-run hyperlinks; setting `table.first_row` styles wipes our custom fills. So we manually fill every cell.
 
+### 7.1 Slide split: main vs feature (v1.2.0+)
+
+`build_deck()` renders **two slides per repo** (in order):
+
+1. `"<repo> | PR SLA (Month)"` — rows where `PrRow.is_to_main` is true
+   (i.e. `target_branch == "main"`).
+2. `"<repo> | Feature Merge PRs (Month)"` — every other row
+   (feature/release branches, draft staging, etc.).
+
+The second slide is always rendered, even when empty, so the deck has a fixed
+slide-count-per-repo (predictable for downstream automation). The split happens
+*after* sorting so each slide's ordering still respects `--sort-by` / `--desc`.
+
+`render_slide()` takes a `title_suffix` parameter for this; don't add a new
+function — extend that.
+
 ---
 
 ## 8. Sorting
@@ -258,16 +322,33 @@ Edit `Monthly Report Data.xlsx` → `Team` sheet. The script resolves their UPN 
 
 | File | Owner | Purpose |
 |---|---|---|
-| `src/generate_report.py` | Everything: config load, ADO client, extraction, PPT build, CLI | Core engine + non-interactive CLI |
-| `src/run_interactive.py` | UX | 5-prompt interactive wrapper. Imports from `generate_report`. PAT via getpass. Never writes the PAT to disk. |
+| `src/generate_report.py` | Everything: config load, ADO client, extraction, PPT build, CLI | Core engine + non-interactive CLI. Exposes `AdoClient`, `build_default_client()`, `_try_az_token()`, `set_report_tz()`, `to_report_date()`. |
+| `src/run_interactive.py` | UX | 6-step (Step 0 prereq + 5 prompts) interactive wrapper. Imports from `generate_report`. Credentials via `prompt_auth()` (env → az → getpass PAT). Never writes secrets to disk. |
+| `src/diag_pr.py` | Debug | Per-PR diagnostic. Run `.venv/bin/python src/diag_pr.py <pr_id> ...` to dump creator UPN, commits, vote threads, and the parsed UTC vs report-tz dates for any PR. Use whenever a deck row looks wrong (missing PR, wrong date, no approval). |
 | `run` | UX | Bash launcher: auto-creates `.venv`, installs `requirements.txt`, execs the interactive runner. |
 | `Monthly Report Data.xlsx` | User | Repos + Team + Template reference |
 | `requirements.txt` | Dev deps | `openpyxl`, `python-pptx`, `requests`, `numpy` — pinned to major versions, not exact |
-| `.github/workflows/monthly-report.yml` | CI | Monthly cron + manual dispatch + artifact upload (uses generate_report.py CLI directly, NOT the interactive runner) |
+| `.github/workflows/monthly-report.yml` | CI | Monthly cron + manual dispatch + artifact upload. Uses `generate_report.py` CLI with the `ADO_PAT` repo secret — `az login` is NOT available in CI. |
 | `output/` | Generated | All `.pptx` files; gitignored |
 | `.venv/` | Local | Python venv; gitignored |
 | `README.md` | User-facing | Setup, usage, features, troubleshooting |
 | `CONTEXT.md` | AI/dev-facing | This file |
+
+### 11.1 Interactive runner steps (v1.0.0+)
+
+`run_interactive.py::main()` runs exactly six numbered steps. They MUST stay
+in this order; reordering breaks the user mental model that other docs reference.
+
+| Step | Function | Purpose |
+|---|---|---|
+| **0/6** | `prompt_prerequisites()` | Confirms Python 3.10+ and Git are installed. Refuses to continue if not (unless user explicitly overrides). |
+| **1/6** | `prompt_confirm_repos()`  | Displays repo list from the `Repos` sheet, `y/n`. `n` exits so user can fix the xlsx. |
+| **2/6** | `prompt_confirm_team()`   | Same for the `Team` sheet. |
+| **3/6** | `prompt_auth()`           | (v1.3.0) 3-tier waterfall: existing `ADO_PAT` → `az` bearer → manual PAT entry. Returns `(kind, value)` where kind is `'pat'` or `'bearer'`. |
+| **4/6** | `prompt_month()`          | Year/month input parsing (`YYYY/MM`, `YYYY-MM`, `MM/YYYY`, etc.). Defaults to previous calendar month. Rejects future months. |
+| **5/6** | `prompt_sort()`           | Y/N for sorting, then key picker (approved / dev-complete / days / author) + asc/desc. |
+
+Step 3's PAT path is preserved for users without `az`; do not remove it.
 
 ---
 
@@ -292,8 +373,21 @@ assert business_days_between(dt.date(2026,4,3),  dt.date(2026,4,3))  == 0
 print('OK')
 "
 
-# 3. Full live run (requires ADO_PAT)
+# 3. Full live run (requires either ADO_PAT or an active `az login`)
 ADO_PAT=<token> python src/generate_report.py --month 2026-05
+#   OR
+az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47 && python src/generate_report.py --month 2026-05
+
+# 4. (v1.3.0) Verify az path is wired up without doing a full run
+python -c "
+import sys; sys.path.insert(0,'src')
+from generate_report import _try_az_token
+t = _try_az_token()
+print('bearer:', 'OK' if t else 'NOT AVAILABLE', f'({len(t)} chars)' if t else '')
+"
+
+# 5. (v1.1.0) Inspect why a specific PR was missed or had wrong dates
+python src/diag_pr.py 1872660 1934106
 ```
 
 If you change the PPT building code (`build_deck` / `render_slide`), you should diff the resulting `.pptx` visually against a known-good output. There's no automated check.
@@ -302,11 +396,22 @@ If you change the PPT building code (`build_deck` / `render_slide`), you should 
 
 ## 13. Security
 
-- The PAT is the only secret. It is read from `ADO_PAT` env var. **Never log it, never echo it, never put it in CLI args**.
-- In GitHub Actions, `ADO_PAT` is set from a repo secret. The workflow file references `${{ secrets.ADO_PAT }}` only — GitHub masks the value in logs.
-- The `.gitignore` excludes `.env`. If you ever add a `.env` for local dev, do **not** commit it.
-- All ADO calls are read-only. The PAT scopes (`Code:Read`, `Work Items:Read`, `Identity:Read`) cannot mutate ADO state even if compromised.
+### Credentials
+
+There are now **two** credential types the app accepts (auto-resolved, see §4.1):
+
+| Type | Where it lives | Risks |
+|---|---|---|
+| **PAT** (Basic auth) | `ADO_PAT` env var. Either in `~/.zshrc` for local, or a GitHub Actions repo secret for CI. | Long-lived (max 90 days). Plaintext on disk if in dotfiles. Rotate by revoking in the ADO UI. **Never log it, never echo it, never put it in CLI args.** |
+| **Bearer** (Entra) | `~/.azure/msal_token_cache.json` (encrypted by macOS Keychain on Mac). Obtained via `az login`; auto-refreshed by `az`. | Short-lived (60–90 min access, refresh good for hours–days). Tied to user's MFA. **Preferred for local use** — no plaintext secret on disk. |
+
+### Operational rules
+
+- GitHub Actions runners can't `az login` — the workflow file references `${{ secrets.ADO_PAT }}` and depends on the repo secret being set. Don't try to switch CI to bearer.
+- `.gitignore` excludes `.env`. If you ever add a `.env` for local dev, do **not** commit it.
+- All ADO calls are read-only. The PAT scopes (`Code:Read`, `Work Items:Read`, `Identity:Read`) and the bearer token's `user_impersonation` scope both grant **read-only** PR data.
 - `Monthly Report Data.xlsx` is committed because UPNs are not sensitive. If your team list ever becomes sensitive, move it to a private location or to GitHub Actions secrets.
+- When debugging via `diag_pr.py`, the PAT/token never appears in its output — only PR metadata.
 
 ---
 

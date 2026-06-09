@@ -431,7 +431,8 @@ pr-sla-report/
 ├── output/                         # generated .pptx files (gitignored)
 ├── src/
 │   ├── generate_report.py          # core extraction + PPT build (also a CLI)
-│   └── run_interactive.py          # interactive 5-prompt wrapper
+│   ├── run_interactive.py          # interactive 6-step wrapper (Step 0 + 5 prompts)
+│   └── diag_pr.py                  # per-PR debug helper (`python src/diag_pr.py <id>`)
 ├── run                             # convenience launcher (auto-creates venv)
 ├── .gitignore
 ├── CONTEXT.md                      # design notes for AI agents working on this repo
