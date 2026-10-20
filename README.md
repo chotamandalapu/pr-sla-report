@@ -487,6 +487,38 @@ Filtered decks have `_over_sla` in the filename, for example
 `output/PR_SLA_2026-05_over_sla.pptx`, and `>2 business days` in the slide titles.
 Normal `./run` reports are unchanged.
 
+### Count PRs without generating a file
+
+```bash
+# All completed PRs (no SLA filter)
+./run --count-only
+
+# Only PRs taking more than 2 business days
+./run --count-only --over-sla
+```
+
+Count-only mode prints per-repo counts and a total to the terminal, skips the
+sorting prompt, and does not generate a PowerPoint or create an output directory.
+It uses the same reporting window, date fallbacks, and filtering as a deck run.
+Existing output files are left untouched. Counts include both main and
+feature-merge PRs.
+
+For July through September 2026 together, use the non-interactive command:
+
+```bash
+# All PRs -- no SLA filter
+.venv/bin/python src/generate_report.py \
+  --from 2026-07-01 --to 2026-09-30 --count-only
+
+# Only PRs taking more than 2 business days
+.venv/bin/python src/generate_report.py \
+  --from 2026-07-01 --to 2026-09-30 --count-only --over-sla
+```
+
+`--count-only` cannot be combined with `--output`. Count-only mode still queries
+Azure DevOps and uses the existing holiday setup (which may update the holiday
+cache); it only suppresses report-file generation.
+
 ---
 
 ## Output columns — full specification

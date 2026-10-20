@@ -407,6 +407,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only include PRs taking more than 2 business days from last commit to approval.",
     )
+    ap.add_argument(
+        "--count-only",
+        action="store_true",
+        help="Print per-repo and total PR counts without generating an output file.",
+    )
     args = ap.parse_args(argv)
     banner("PR SLA — Interactive Monthly Report")
     if args.over_sla:
@@ -456,10 +461,10 @@ def main(argv: list[str] | None = None) -> int:
     since, until, month_label, slug = prompt_month()
 
     # 5. Sort
-    sort_by, sort_desc = prompt_sort()
+    sort_by, sort_desc = ("approved", False) if args.count_only else prompt_sort()
 
     # ---- Execute -----------------------------------------------------------
-    banner("Generating report")
+    banner("Counting PRs" if args.count_only else "Generating report")
     print(f"  {DIM}This can take 30s–2min depending on team size + PR count.{RESET}")
     print(f"  {DIM}Each PR triggers ~3 ADO API calls (commits, threads, work items).{RESET}")
     print()
@@ -495,7 +500,12 @@ def main(argv: list[str] | None = None) -> int:
             warn("No PRs matched the >2 business-day filter in the reporting window.")
         else:
             warn("No PRs matched. Check the team UPNs and the reporting window.")
-        warn("A deck will still be generated with empty tables.")
+        if not args.count_only:
+            warn("A deck will still be generated with empty tables.")
+
+    if args.count_only:
+        ok("Count complete. No output file generated.")
+        return 0
 
     out_path = OUTPUT_DIR / f"PR_SLA_{slug}.pptx"
     try:

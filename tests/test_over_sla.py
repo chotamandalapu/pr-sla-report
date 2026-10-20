@@ -133,12 +133,58 @@ class OverSlaTests(unittest.TestCase):
             self.assertEqual(report.main(args + ["--over-sla", "--output", str(custom)]), 0)
             self.assert_deck(custom, [4, 5], True)
 
-    def test_interactive_flag_and_empty_filtered_deck(self):
+    def test_cli_count_only_with_and_without_sla_filter(self):
         all_prs = self.client.completed_prs_for_user.return_value
         for filtered, empty in ((False, False), (True, False), (True, True)):
             with self.subTest(filtered=filtered, empty=empty), tempfile.TemporaryDirectory() as tmp, \
                     contextlib.redirect_stdout(io.StringIO()) as output, \
-                    patch.object(interactive, "OUTPUT_DIR", Path(tmp)), \
+                    patch.object(report, "OUTPUT_DIR", Path(tmp) / "output"), \
+                    patch.object(report, "load_config", return_value=([self.repo], self.team)), \
+                    patch.object(report, "build_default_client", return_value=self.client), \
+                    patch.object(report, "build_deck") as build:
+                self.client.completed_prs_for_user.return_value = [] if empty else all_prs
+                args = [
+                    "--from", "2026-07-01", "--to", "2026-09-30",
+                    "--holidays", "off", "--count-only",
+                ]
+                if filtered:
+                    args.append("--over-sla")
+                self.assertEqual(report.main(args), 0)
+                expected = 0 if empty else (2 if filtered else 6)
+                self.assertIn(f"repo: {expected} PR(s)", output.getvalue())
+                self.assertIn(f"Total: {expected} PR(s)", output.getvalue())
+                self.assertEqual(">2 business days" in output.getvalue(), filtered)
+                build.assert_not_called()
+                self.assertFalse((Path(tmp) / "output").exists())
+                self.client.completed_prs_for_user.assert_called_with(
+                    self.repo, self.team[0][1], dt.date(2026, 7, 1), dt.date(2026, 9, 30),
+                )
+                report.OUTPUT_DIR.mkdir()
+                existing = report.OUTPUT_DIR / "PR_SLA_2026-07-01_2026-09-30.pptx"
+                existing.write_bytes(b"existing report")
+                self.assertEqual(report.main(args), 0)
+                self.assertEqual(existing.read_bytes(), b"existing report")
+                self.assertEqual(list(report.OUTPUT_DIR.iterdir()), [existing])
+                build.assert_not_called()
+
+    def test_count_only_rejects_output_path(self):
+        with contextlib.redirect_stderr(io.StringIO()), \
+                patch.object(report, "build_default_client") as client:
+            with self.assertRaises(SystemExit) as error:
+                report.main(["--count-only", "--output", "unused.pptx"])
+            self.assertEqual(error.exception.code, 2)
+            client.assert_not_called()
+
+    def test_interactive_decks_and_count_only(self):
+        all_prs = self.client.completed_prs_for_user.return_value
+        for filtered, empty, count_only in (
+            (False, False, False), (True, False, False), (True, True, False),
+            (False, False, True), (True, False, True), (True, True, True),
+        ):
+            with self.subTest(filtered=filtered, empty=empty, count_only=count_only), \
+                    tempfile.TemporaryDirectory() as tmp, \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    patch.object(interactive, "OUTPUT_DIR", Path(tmp) / "output"), \
                     patch.object(interactive, "CONFIG_XLSX") as config, \
                     patch.object(interactive, "load_config", return_value=([self.repo], self.team)), \
                     patch.object(interactive, "prompt_prerequisites"), \
@@ -148,12 +194,16 @@ class OverSlaTests(unittest.TestCase):
                     patch.object(interactive, "prompt_month", return_value=(
                         self.since, self.until, "May-July 2026", "2026-05_2026-07",
                     )), \
-                    patch.object(interactive, "prompt_sort", return_value=("days", True)), \
+                    patch.object(interactive, "prompt_sort", return_value=("days", True)) as sort, \
+                    patch.object(interactive, "build_deck", wraps=report.build_deck) as build, \
                     patch.object(interactive, "AdoClient", return_value=self.client), \
                     patch.object(interactive, "configure_holidays") as holidays:
                 config.exists.return_value = True
                 self.client.completed_prs_for_user.return_value = [] if empty else all_prs
-                self.assertEqual(interactive.main(["--over-sla"] if filtered else []), 0)
+                args = ["--over-sla"] if filtered else []
+                if count_only:
+                    args.append("--count-only")
+                self.assertEqual(interactive.main(args), 0)
                 if filtered:
                     holidays.assert_called_once_with(self.since, self.until)
                     if empty:
@@ -162,8 +212,18 @@ class OverSlaTests(unittest.TestCase):
                     holidays.assert_not_called()
                 suffix = "_over_sla" if filtered else ""
                 expected_ids = [] if empty else ([4, 5] if filtered else [1, 2, 3, 4, 5, 6])
+                self.assertIn(f"Total: {len(expected_ids)} PR(s)", output.getvalue())
+                if count_only:
+                    build.assert_not_called()
+                    sort.assert_not_called()
+                    self.assertFalse(interactive.OUTPUT_DIR.exists())
+                    self.assertIn("No output file generated", output.getvalue())
+                    self.assertNotIn("A deck will still be generated", output.getvalue())
+                    continue
+                sort.assert_called_once()
                 self.assert_deck(
-                    Path(tmp) / f"PR_SLA_2026-05_2026-07{suffix}.pptx", expected_ids, filtered,
+                    interactive.OUTPUT_DIR / f"PR_SLA_2026-05_2026-07{suffix}.pptx",
+                    expected_ids, filtered,
                 )
 
 

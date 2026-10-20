@@ -276,6 +276,35 @@ retain their existing holiday behavior. Filtered filenames end in
 `_over_sla.pptx` (unless CLI `--output` overrides the path), and slide labels
 include `>2 business days`. Empty repo slides remain present.
 
+### Count-only mode
+
+Both entry points support `--count-only`, independently or with `--over-sla`.
+They use the existing extraction pipeline, print per-repo and total counts,
+and return before `build_deck()` or any output-path creation. Existing reports
+are untouched. The interactive runner skips only the sorting prompt in this
+mode. CLI `--count-only` and `--output` are mutually exclusive. Holiday handling
+and its cache remain the same as the corresponding deck run.
+
+Examples for July, August, and September 2026 combined (counts only; no report
+file is generated):
+
+```bash
+# All PRs -- no SLA filter
+.venv/bin/python src/generate_report.py \
+  --from 2026-07-01 --to 2026-09-30 --count-only
+
+# Only PRs taking more than 2 business days
+.venv/bin/python src/generate_report.py \
+  --from 2026-07-01 --to 2026-09-30 --count-only --over-sla
+```
+
+For a single month chosen through the interactive prompts:
+
+```bash
+./run --count-only
+./run --count-only --over-sla
+```
+
 ---
 
 ## 9. Things deliberately NOT done

@@ -944,11 +944,17 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--month", help="YYYY-MM (defaults to previous calendar month).")
     g.add_argument("--from", dest="from_date", help="Start date YYYY-MM-DD.")
     ap.add_argument("--to", dest="to_date", help="End date YYYY-MM-DD (with --from).")
-    ap.add_argument(
+    output_group = ap.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--output",
         type=Path,
         default=None,
         help="Output .pptx path (default: output/PR_SLA_<MONTH>.pptx).",
+    )
+    output_group.add_argument(
+        "--count-only",
+        action="store_true",
+        help="Print per-repo and total PR counts without generating an output file.",
     )
     ap.add_argument(
         "--sort-by",
@@ -1034,6 +1040,13 @@ def main(argv: list[str] | None = None) -> int:
 
     total = sum(len(v) for v in data.values())
     log.info("Total PRs across all repos: %d", total)
+
+    if args.count_only:
+        print(f"PR counts ({month_label})")
+        for repo, rows in data.items():
+            print(f"  {repo.short_name}: {len(rows)} PR(s)")
+        print(f"Total: {total} PR(s)")
+        return 0
 
     out_path = args.output or (OUTPUT_DIR / f"PR_SLA_{slug}.pptx")
     build_deck(
