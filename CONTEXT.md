@@ -261,6 +261,21 @@ function — extend that.
 
 `--desc` is just `reverse=True` passed to `list.sort()`. Don't try to invert specific dimensions selectively — adds bugs without clear benefit.
 
+### Opt-in SLA filtering
+
+Both `./run --over-sla` and `generate_report.py --over-sla` pass
+`over_sla=True` to `extract_rows()`. It keeps only rows whose existing
+`business_days_between(last_commit, last_approval)` result is **strictly > 2**.
+Exactly 2 is excluded. Filtering happens before fetching work items, applies
+to every target branch, and preserves the existing completion-date fallbacks.
+Normal extraction is unchanged.
+
+`configure_holidays()` is shared by the CLI and the filtered interactive run;
+it fetches every year in the reporting window. Unfiltered interactive runs
+retain their existing holiday behavior. Filtered filenames end in
+`_over_sla.pptx` (unless CLI `--output` overrides the path), and slide labels
+include `>2 business days`. Empty repo slides remain present.
+
 ---
 
 ## 9. Things deliberately NOT done
@@ -272,7 +287,6 @@ function — extend that.
 | Reviewer-side filtering ("PRs reviewed by X") | Out of scope; current SLA is creator-centric. |
 | Pulling work-item titles | Doubles request count; user just needs ID + hyperlink. |
 | HTML / Markdown output | PowerPoint is the required deliverable. |
-| Test suite | Project is ~500 LOC with smoke tests in the README. Unit tests would mostly be mocking the ADO client. Add them only if the project grows. |
 | Python packaging (pyproject.toml + entrypoint) | One file, one user, one schedule. Overhead doesn't pay off. |
 
 ---
@@ -356,7 +370,16 @@ Step 3's PAT path is preserved for users without `az`; do not remove it.
 
 ## 12. Tests / smoke checks
 
-There is no `tests/` directory. The contract surface is small and the dominant risk is ADO API drift. Recommended smoke procedure when changing extraction logic:
+Run the focused SLA-filter regression tests (no network or credentials needed):
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+These cover strict threshold boundaries, holiday/weekend handling, date
+fallbacks, both entry points, and generated deck contents. The contract surface
+is small and the dominant remaining risk is ADO API drift. Recommended smoke
+procedure when changing extraction logic:
 
 ```bash
 # 1. Compile check

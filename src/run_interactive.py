@@ -14,6 +14,7 @@ or (after `chmod +x ./run`):
 
 from __future__ import annotations
 
+import argparse
 import calendar
 import datetime as dt
 import getpass
@@ -33,6 +34,7 @@ from generate_report import (
     SORT_CHOICES,
     AdoClient,
     build_deck,
+    configure_holidays,
     extract_rows,
     load_config,
     parse_month,
@@ -398,8 +400,17 @@ def prompt_sort() -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Generate a PR SLA report interactively.")
+    ap.add_argument(
+        "--over-sla",
+        action="store_true",
+        help="Only include PRs taking more than 2 business days from last commit to approval.",
+    )
+    args = ap.parse_args(argv)
     banner("PR SLA — Interactive Monthly Report")
+    if args.over_sla:
+        ok("Filter: only PRs taking more than 2 business days from last commit to approval.")
 
     # Timezone notice — printed FIRST so the user always sees it.
     from generate_report import report_tz_name
@@ -454,15 +465,21 @@ def main() -> int:
     print()
 
     try:
+        if args.over_sla:
+            configure_holidays(since, until)
         if auth_kind == "bearer":
             client = AdoClient(bearer_token=auth_value)
         else:
             client = AdoClient(pat=auth_value)
-        data = extract_rows(client, repos, team, since, until)
+        data = extract_rows(client, repos, team, since, until, over_sla=args.over_sla)
     except Exception as e:
         print()
         fail(f"Extraction failed: {e}")
         return 2
+
+    if args.over_sla:
+        month_label += "; >2 business days"
+        slug += "_over_sla"
 
     total = sum(len(v) for v in data.values())
     print()
@@ -474,7 +491,10 @@ def main() -> int:
     print(f"  {BOLD}Total: {total} PR(s){RESET}")
 
     if total == 0:
-        warn("No PRs matched. Check the team UPNs and the reporting window.")
+        if args.over_sla:
+            warn("No PRs matched the >2 business-day filter in the reporting window.")
+        else:
+            warn("No PRs matched. Check the team UPNs and the reporting window.")
         warn("A deck will still be generated with empty tables.")
 
     out_path = OUTPUT_DIR / f"PR_SLA_{slug}.pptx"

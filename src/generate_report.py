@@ -652,6 +652,23 @@ def business_days_between(start: dt.date, end: dt.date) -> int:
     return int(np.busday_count(start, end))
 
 
+def configure_holidays(since: dt.date, until: dt.date, mode: str = "auto") -> None:
+    if mode == "off":
+        set_holiday_dates(None)
+        log.info("Holidays: not excluded (--holidays off)")
+        return
+    years = list(range(since.year, until.year + 1))
+    all_hols: list[dt.date] = []
+    for year in years:
+        all_hols.extend(fetch_microsoft_holidays(year))
+    dates = sorted(set(all_hols))
+    set_holiday_dates(dates)
+    log.info(
+        "Holidays: excluded %d Microsoft-observed day(s) for year(s) %s",
+        len(dates), years,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main extraction
 # ---------------------------------------------------------------------------
@@ -661,6 +678,7 @@ def extract_rows(
     team: list[tuple[str, str]],
     since: dt.date,
     until: dt.date,
+    over_sla: bool = False,
 ) -> dict[RepoRef, list[PrRow]]:
     out: dict[RepoRef, list[PrRow]] = {r: [] for r in repos}
     for repo in repos:
@@ -684,6 +702,13 @@ def extract_rows(
                         pr_id, closed,
                     )
                     last_approval = closed
+                business_days = business_days_between(last_commit, last_approval)
+                if over_sla and business_days <= 2:
+                    log.info(
+                        "  PR %d: excluded (%d business day(s); requires > 2)",
+                        pr_id, business_days,
+                    )
+                    continue
                 wi_ids = client.pr_work_item_ids(repo, pr_id)
                 target_ref = pr.get("targetRefName", "") or ""
                 target_branch = target_ref.removeprefix("refs/heads/")
@@ -696,9 +721,7 @@ def extract_rows(
                         author_upn=upn,
                         dev_complete_date=last_commit,
                         approved_date=last_approval,
-                        business_days=business_days_between(
-                            last_commit, last_approval
-                        ),
+                        business_days=business_days,
                         work_item_ids=wi_ids,
                         closed_date=closed,
                         target_branch=target_branch,
@@ -954,6 +977,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ap.add_argument(
+        "--over-sla",
+        action="store_true",
+        help="Only include PRs taking more than 2 business days from last commit to approval.",
+    )
+    ap.add_argument(
         "--holidays",
         default="auto",
         choices=["auto", "off"],
@@ -992,24 +1020,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Holiday set up — fetched ONCE before extraction so business-day math
     # in extract_rows() uses the correct exclusions.
-    if args.holidays == "auto":
-        years = sorted({since.year, until.year})
-        all_hols: list[dt.date] = []
-        for y in years:
-            all_hols.extend(fetch_microsoft_holidays(y))
-        set_holiday_dates(sorted(set(all_hols)))
-        log.info(
-            "Holidays: excluded %d Microsoft-observed day(s) for year(s) %s",
-            len(all_hols), years,
-        )
-    else:
-        set_holiday_dates(None)
-        log.info("Holidays: not excluded (--holidays off)")
+    configure_holidays(since, until, args.holidays)
 
     repos, team = load_config(CONFIG_XLSX)
     client = build_default_client()
 
-    data = extract_rows(client, repos, team, since, until)
+    data = extract_rows(client, repos, team, since, until, over_sla=args.over_sla)
+
+    if args.over_sla:
+        month_label += "; >2 business days"
+        slug += "_over_sla"
+        log.info("Filter: only PRs taking more than 2 business days")
 
     total = sum(len(v) for v in data.values())
     log.info("Total PRs across all repos: %d", total)

@@ -465,6 +465,28 @@ Then it runs, prints a per-repo extraction summary (PR counts), and ends with:
 
 Ctrl-C at any prompt cancels cleanly.
 
+### Report only PRs taking more than 2 business days
+
+```bash
+./run --over-sla
+```
+
+The same prompts are shown, but the deck includes only PRs with **Days To
+Process > 2**: exactly 2 days is excluded; 3 or more is included. The interval
+is from the **last commit date** (the report's submitted/dev-complete date),
+not PR creation, to the **last approval date**. Weekends and fetched
+Microsoft-observed holidays are excluded. If holidays cannot be fetched, a
+warning is logged and the existing weekends-only calculation is used.
+
+This applies to both main and feature-merge slides. Existing date fallbacks
+still apply: missing commit or approval dates use the PR's completion date.
+The reporting window still selects PRs by completion date, not submission date.
+Empty slides are retained if no PRs qualify.
+
+Filtered decks have `_over_sla` in the filename, for example
+`output/PR_SLA_2026-05_over_sla.pptx`, and `>2 business days` in the slide titles.
+Normal `./run` reports are unchanged.
+
 ---
 
 ## Output columns — full specification
@@ -635,6 +657,9 @@ python src/generate_report.py --month 2026-05
 
 # Arbitrary date range
 python src/generate_report.py --from 2026-04-01 --to 2026-04-30
+
+# Only PRs taking more than 2 business days, across multiple months
+python src/generate_report.py --from 2026-05-01 --to 2026-07-31 --over-sla
 
 # Choose a sort
 python src/generate_report.py --sort-by dev-complete
